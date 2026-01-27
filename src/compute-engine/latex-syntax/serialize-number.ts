@@ -223,7 +223,7 @@ function serializeScientificNotationNumber(
 
     if (valString.indexOf('.') < 0) {
       if (valString.length === 1) {
-        valString = sign + valString + 'e+0';
+        valString = sign + valString + 'eX+0';
       } else {
         // A long integer, convert to exponential form
         valString =
