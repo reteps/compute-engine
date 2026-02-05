@@ -10,6 +10,22 @@ export { ComputeEngine } from './compute-engine/index';
 
 export * from './compute-engine/types';
 
+// Export compilation types and classes for advanced users
+export type {
+  CompileTarget,
+  CompiledOperators,
+  CompiledFunctions,
+  CompilationOptions,
+  CompiledExecutable,
+  LanguageTarget,
+  TargetSource,
+  CompiledFunction,
+} from './compute-engine/compilation/types';
+
+export { JavaScriptTarget } from './compute-engine/compilation/javascript-target';
+export { GLSLTarget } from './compute-engine/compilation/glsl-target';
+export { BaseCompiler } from './compute-engine/compilation/base-compiler';
+
 globalThis[Symbol.for('io.cortexjs.compute-engine')] = {
   ComputeEngine: ComputeEngine.prototype.constructor,
   version: '{{SDK_VERSION}}',

@@ -51,8 +51,11 @@ describe('Primality Test', () => {
           ]
         ]
       ]
-      simplify  = -floor(cos((pi * (n - 1)! + pi) / n))
-      eval-auto = NaN
+      simplify  = -floor(cos(pi / n + (pi * (n - 1)!) / n))
+      eval-auto = -floor(cos((pi * (n - 1)! + pi) / n))
+      eval-mach = -floor(cos((pi * (n - 1)! + pi) / n))
+      N-auto    = -floor(cos((3.14159265358979323846 * (n - 1)! + 3.14159265358979323846) / n))
+      N-mach    = -floor(cos((3.141592653589793 * (n - 1)! + 3.141592653589793) / n))
     `));
   // 	https://en.wikipedia.org/wiki/Wilson%27s_theorem
   // 	https://en.wikipedia.org/wiki/Primality_test#Wilson's_theorem
@@ -75,94 +78,161 @@ describe('Nth PRIME NUMBER', () =>
         'p(n):=(\\sum_{v_{1}=2}^{\\operatorname{floor}\\left(1.5*n*\\ln(n)\\right)}(\\operatorname{floor}(\\frac{1}{0^{n-(\\sum_{v_{2}=2}^{v_{1}}((\\prod_{v_{3}=2}^{\\operatorname{floor}(\\sqrt{v_{2}})}(1-0^{\\operatorname{abs}(\\operatorname{floor}(\\frac{v_{2}}{v_{3}})-\\frac{v_{2}}{v_{3}})}))))}+1})))+2'
       )
     ).toMatchInlineSnapshot(`
-      invalid   =[
+      box       = [
         "Assign",
         "p",
         [
           "Function",
           [
-            "Block",
+            "Add",
             [
-              "Add",
+              "Delimiter",
               [
                 "Sum",
                 [
-                  "Floor",
+                  "Delimiter",
                   [
-                    "Divide",
-                    1,
+                    "Floor",
                     [
-                      "Add",
+                      "Divide",
+                      1,
                       [
-                        "Power",
-                        0,
+                        "Add",
                         [
-                          "Add",
-                          "n",
+                          "Power",
+                          0,
                           [
-                            "Negate",
+                            "Subtract",
+                            "n",
                             [
-                              "Sum",
+                              "Delimiter",
                               [
-                                "Product",
+                                "Sum",
                                 [
-                                  "Subtract",
-                                  1,
+                                  "Delimiter",
                                   [
-                                    "Power",
-                                    0,
+                                    "Delimiter",
                                     [
-                                      "Abs",
+                                      "Product",
                                       [
-                                        "Subtract",
-                                        ["Floor", ["Divide", "v_2", "v_3"]],
-                                        ["Divide", "v_2", "v_3"]
+                                        "Delimiter",
+                                        [
+                                          "Subtract",
+                                          1,
+                                          [
+                                            "Power",
+                                            0,
+                                            [
+                                              "Abs",
+                                              [
+                                                "Subtract",
+                                                [
+                                                  "Floor",
+                                                  ["Divide", "v_2", "v_3"]
+                                                ],
+                                                ["Divide", "v_2", "v_3"]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ],
+                                      [
+                                        "Triple",
+                                        "v_3",
+                                        2,
+                                        ["Floor", ["Sqrt", "v_2"]]
                                       ]
                                     ]
                                   ]
                                 ],
-                                [
-                                  "Limits",
-                                  "Nothing",
-                                  2,
-                                  ["Floor", ["Sqrt", "v_2"]]
-                                ]
-                              ],
-                              [
-                                "Limits",
-                                "Nothing",
-                                2,
-                                [
-                                  "Error",
-                                  [
-                                    "ErrorCode",
-                                    "incompatible-type",
-                                    "'number'",
-                                    "'unknown'"
-                                  ]
-                                ]
+                                ["Triple", "v_2", 2, "v_1"]
                               ]
                             ]
                           ]
-                        ]
-                      ],
-                      1
+                        ],
+                        1
+                      ]
                     ]
                   ]
                 ],
                 [
-                  "Limits",
-                  "Nothing",
+                  "Triple",
+                  "v_1",
                   2,
                   ["Floor", ["Multiply", 1.5, "n", ["Ln", "n"]]]
                 ]
-              ],
-              2
-            ]
+              ]
+            ],
+            2
           ],
           "n"
         ]
       ]
+      canonical = [
+        "Assign",
+        "p",
+        [
+          "Function",
+          [
+            "Add",
+            [
+              "Sum",
+              [
+                "Floor",
+                [
+                  "Divide",
+                  1,
+                  [
+                    "Add",
+                    [
+                      "Power",
+                      0,
+                      [
+                        "Subtract",
+                        "n",
+                        [
+                          "Sum",
+                          [
+                            "Product",
+                            [
+                              "Subtract",
+                              1,
+                              [
+                                "Power",
+                                0,
+                                [
+                                  "Abs",
+                                  [
+                                    "Subtract",
+                                    ["Floor", ["Divide", "v_2", "v_3"]],
+                                    ["Divide", "v_2", "v_3"]
+                                  ]
+                                ]
+                              ]
+                            ],
+                            ["Limits", "v_3", 2, ["Floor", ["Sqrt", "v_2"]]]
+                          ],
+                          ["Limits", "v_2", 2, "v_1"]
+                        ]
+                      ]
+                    ],
+                    1
+                  ]
+                ]
+              ],
+              [
+                "Limits",
+                "v_1",
+                2,
+                ["Floor", ["Multiply", 1.5, "n", ["Ln", "n"]]]
+              ]
+            ],
+            2
+          ],
+          "n"
+        ]
+      ]
+      eval-auto = (n) |-> sum_(v_1=2)^(floor(1.5 * n * ln(n)))(floor(1 / (0^(n - sum_(v_2=2)^("v_1")(prod_(v_3=2)^(floor(sqrt("v_2")))(1 - 0^(|-"v_2" / "v_3" + floor("v_2" / "v_3")|)))) + 1))) + 2
     `);
   }));
 

@@ -1,4 +1,4 @@
-import { Expression } from '../../../src/math-json.ts';
+import { Expression } from '../../../src/math-json';
 import { engine as ce } from '../../utils';
 
 const m4: Expression = ['List', ['List', 1, 2], ['List', 3, 4]];
@@ -222,5 +222,26 @@ describe('Serializing vectors', () => {
       0\\\\
       -1\\end{bmatrix}
     `);
+  });
+});
+
+describe('MatrixMultiply LaTeX', () => {
+  it('should serialize matrix multiplication', () => {
+    // Use Matrix wrapper for proper LaTeX serialization
+    const matrix = ['Matrix', m4];
+    const result = ce.box(['MatrixMultiply', matrix, matrix]);
+    expect(result.latex).toMatchInlineSnapshot(`
+      \\begin{pmatrix}1 & 2\\\\
+      3 & 4\\end{pmatrix} \\cdot \\begin{pmatrix}1 & 2\\\\
+      3 & 4\\end{pmatrix}
+    `);
+  });
+
+  it('should serialize matrix × raw list multiplication', () => {
+    // Raw lists serialize differently than Matrix-wrapped lists
+    const result = ce.box(['MatrixMultiply', m4, m4]);
+    expect(result.latex).toMatchInlineSnapshot(
+      `\\bigl\\lbrack\\bigl\\lbrack1, 2\\bigr\\rbrack, \\bigl\\lbrack3, 4\\bigr\\rbrack\\bigr\\rbrack \\cdot \\bigl\\lbrack\\bigl\\lbrack1, 2\\bigr\\rbrack, \\bigl\\lbrack3, 4\\bigr\\rbrack\\bigr\\rbrack`
+    );
   });
 });

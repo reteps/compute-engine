@@ -3,6 +3,7 @@ import { check, checkJson, engine } from '../utils';
 const ce = engine;
 
 ce.assign('z', ['Complex', 0, 1]);
+ce.declare('b', 'integer'); // Used in Sum/Product simplification tests
 
 describe('CONSTANTS', () => {
   test(`ExponentialE`, () =>
@@ -695,7 +696,7 @@ describe('SUM', () => {
         .box(['Sum', ['Divide', 1, 'x'], 'x'])
         .evaluate()
         .toString()
-    ).toMatchInlineSnapshot(`44057567621371730/3061099221058841`));
+    ).toMatchInlineSnapshot(`5690887772881993/581432233225878`));
 
   it('should compute the sum of a collection', () =>
     expect(
@@ -717,6 +718,655 @@ describe('SUM', () => {
         .evaluate()
         .toString()
     ).toMatchInlineSnapshot(`4840`));
+
+  // Regression tests for issue #252: Sum with free variables
+  it('should handle sum with free variable (issue #252)', () =>
+    expect(
+      ce.parse('\\sum_{n=1}^{10}(x)').evaluate().toString()
+    ).toMatchInlineSnapshot(`10x`));
+
+  it('should handle sum with mixed index and free variable (issue #252)', () =>
+    expect(
+      ce.parse('\\sum_{n=1}^{10}(n \\cdot x)').evaluate().toString()
+    ).toMatchInlineSnapshot(`55x`));
+
+  it('should handle sum with addition of index and free variable (issue #252)', () =>
+    expect(
+      ce.parse('\\sum_{n=1}^{3}(n + x)').evaluate().simplify().toString()
+    ).toMatchInlineSnapshot(`3x + 6`));
+
+  // Simplification of Sum with symbolic bounds
+  it('should simplify sum of constant with symbolic bounds', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(x)').simplify().toString()
+    ).toMatchInlineSnapshot(`b * x`);
+  });
+
+  it('should simplify sum of index (triangular number)', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(n)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/2 * (b^2 + b)`);
+  });
+
+  it('should simplify sum of index squared', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(n^2)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/3 * b^3 + 1/2 * b^2 + 1/6 * b`);
+  });
+
+  it('should factor out constant from sum', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(3n)').simplify().toString()
+    ).toMatchInlineSnapshot(`3/2 * b^2 + 3/2 * b`);
+  });
+
+  it('should factor out symbolic constant from sum', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(x \\cdot n)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/2 * x * (b^2 + b)`);
+  });
+
+  it('should simplify sum of cubes', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(n^3)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/4 * (b^2 + b)^2`);
+  });
+
+  it('should simplify geometric series starting at 0', () => {
+    ce.declare('r', 'real');
+    expect(
+      ce.parse('\\sum_{n=0}^{b}(r^n)').simplify().toString()
+    ).toMatchInlineSnapshot(`(1 - r^(b + 1)) / (1 - r)`);
+  });
+
+  it('should simplify geometric series starting at 1', () => {
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(r^n)').simplify().toString()
+    ).toMatchInlineSnapshot(`(r - r^(b + 1)) / (1 - r)`);
+  });
+
+  it('should evaluate geometric series numerically', () => {
+    expect(
+      ce.parse('\\sum_{n=0}^{5}(2^n)').simplify().toString()
+    ).toMatchInlineSnapshot(`63`);
+  });
+
+  // Edge cases
+  it('should return 0 for empty sum range', () => {
+    expect(
+      ce.parse('\\sum_{n=5}^{1}(n)').simplify().toString()
+    ).toMatchInlineSnapshot(`0`);
+  });
+
+  it('should return body value for single iteration sum', () => {
+    expect(
+      ce.parse('\\sum_{n=5}^{5}(n^2)').simplify().toString()
+    ).toMatchInlineSnapshot(`5^2`);
+  });
+
+  // Alternating unit series
+  it('should simplify alternating unit series', () => {
+    expect(
+      ce.parse('\\sum_{n=0}^{b}((-1)^n)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/2 * (-1)^b + 1/2`);
+  });
+
+  it('should evaluate alternating unit series (even upper bound)', () => {
+    expect(
+      ce.parse('\\sum_{n=0}^{4}((-1)^n)').evaluate().toString()
+    ).toMatchInlineSnapshot(`1`);
+  });
+
+  it('should evaluate alternating unit series (odd upper bound)', () => {
+    expect(
+      ce.parse('\\sum_{n=0}^{5}((-1)^n)').evaluate().toString()
+    ).toMatchInlineSnapshot(`0`);
+  });
+
+  // Arithmetic progression
+  it('should simplify arithmetic progression', () => {
+    ce.declare('a', 'real');
+    ce.declare('d', 'real');
+    expect(
+      ce.parse('\\sum_{n=0}^{b}(a + d*n)').simplify().toString()
+    ).toMatchInlineSnapshot(`(b + 1) * (1/2 * b * d + a)`);
+  });
+
+  it('should evaluate arithmetic progression numerically', () => {
+    // 2 + 5 + 8 + 11 + 14 = 40
+    expect(
+      ce.parse('\\sum_{n=0}^{4}(2 + 3*n)').evaluate().toString()
+    ).toMatchInlineSnapshot(`40`);
+  });
+
+  // Alternating linear series
+  it('should simplify alternating linear series', () => {
+    expect(
+      ce.parse('\\sum_{n=0}^{b}((-1)^n * n)').simplify().toString()
+    ).toMatchInlineSnapshot(`floor(1/2 * (b + 1)) * (-1)^b`);
+  });
+
+  it('should evaluate alternating linear series', () => {
+    // 0 - 1 + 2 - 3 + 4 = 2
+    expect(
+      ce.parse('\\sum_{n=0}^{4}((-1)^n * n)').evaluate().toString()
+    ).toMatchInlineSnapshot(`2`);
+  });
+
+  // General bounds for triangular number
+  it('should simplify sum with general lower bound', () => {
+    // 'a' already declared above
+    expect(
+      ce.parse('\\sum_{n=a}^{b}(n)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/2 * (-a^2 + b^2 + a + b)`);
+  });
+
+  it('should evaluate sum with numeric lower bound', () => {
+    // 3 + 4 + 5 + 6 + 7 = 25
+    expect(
+      ce.parse('\\sum_{n=3}^{7}(n)').simplify().toString()
+    ).toMatchInlineSnapshot(`25`);
+  });
+
+  // Sum of binomial coefficients
+  it('should simplify sum of binomial coefficients', () => {
+    expect(
+      ce
+        .box(['Sum', ['Binomial', 'b', 'k'], ['Limits', 'k', 0, 'b']])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`2^b`);
+  });
+
+  it('should evaluate sum of binomial coefficients', () => {
+    // C(5,0) + C(5,1) + ... + C(5,5) = 32
+    expect(
+      ce
+        .box(['Sum', ['Binomial', 5, 'k'], ['Limits', 'k', 0, 5]])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`32`);
+  });
+
+  // Nested sum simplification
+  it('should simplify nested sums', () => {
+    // sum_{k=1}^{n} sum_{j=1}^{k} 1 = sum_{k=1}^{n} k = n(n+1)/2
+    expect(
+      ce.parse('\\sum_{k=1}^{b}\\sum_{j=1}^{k}(1)').simplify().toString()
+    ).toMatchInlineSnapshot(`1/2 * (b^2 + b)`);
+  });
+
+  // Alternating binomial sum: Sum((-1)^k * C(n,k), [k, 0, n]) = 0
+  it('should simplify alternating binomial sum to 0', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', -1, 'k'], ['Binomial', 'b', 'k']],
+          ['Tuple', 'k', 0, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`0`);
+  });
+
+  it('should evaluate alternating binomial sum', () => {
+    // (-1)^0 * C(4,0) + (-1)^1 * C(4,1) + ... + (-1)^4 * C(4,4) = 1 - 4 + 6 - 4 + 1 = 0
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', -1, 'k'], ['Binomial', 4, 'k']],
+          ['Tuple', 'k', 0, 4],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`0`);
+  });
+
+  // Weighted binomial sum: Sum(k * C(n,k), [k, 0, n]) = n * 2^(n-1)
+  it('should simplify weighted binomial sum', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', 'k', ['Binomial', 'b', 'k']],
+          ['Tuple', 'k', 0, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`b * 2^(b - 1)`);
+  });
+
+  it('should evaluate weighted binomial sum', () => {
+    // 0*C(4,0) + 1*C(4,1) + 2*C(4,2) + 3*C(4,3) + 4*C(4,4) = 0 + 4 + 12 + 12 + 4 = 32 = 4 * 2^3
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', 'k', ['Binomial', 4, 'k']],
+          ['Tuple', 'k', 0, 4],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`32`);
+  });
+
+  // Partial fractions / telescoping: Sum(1/(k*(k+1)), [k, 1, n]) = n/(n+1)
+  it('should simplify partial fractions (telescoping sum)', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Divide', 1, ['Multiply', 'k', ['Add', 'k', 1]]],
+          ['Tuple', 'k', 1, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`b / (b + 1)`);
+  });
+
+  it('should evaluate partial fractions (telescoping sum)', () => {
+    // 1/(1*2) + 1/(2*3) + 1/(3*4) + 1/(4*5) = 1/2 + 1/6 + 1/12 + 1/20 = 4/5
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Divide', 1, ['Multiply', 'k', ['Add', 'k', 1]]],
+          ['Tuple', 'k', 1, 4],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`4/5`);
+  });
+
+  // Partial fractions / telescoping with k*(k-1): Sum(1/(k*(k-1)), [k, 2, n]) = (n-1)/n
+  it('should simplify partial fractions 1/(k*(k-1))', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Divide', 1, ['Multiply', 'k', ['Add', 'k', -1]]],
+          ['Tuple', 'k', 2, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`-1 / b + 1`);
+  });
+
+  it('should evaluate partial fractions 1/(k*(k-1))', () => {
+    // 1/(2*1) + 1/(3*2) + 1/(4*3) + 1/(5*4) = 1/2 + 1/6 + 1/12 + 1/20 = 4/5
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Divide', 1, ['Multiply', 'k', ['Add', 'k', -1]]],
+          ['Tuple', 'k', 2, 5],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`4/5`);
+  });
+
+  // Note: Sum of fourth and fifth powers don't simplify because their
+  // closed-form expressions are more expensive than the Sum expression
+  // (cost ratio > 1.2). They can still be evaluated numerically.
+  it('should evaluate sum of fourth powers numerically', () => {
+    // 1^4 + 2^4 + 3^4 + 4^4 = 1 + 16 + 81 + 256 = 354
+    expect(
+      ce.parse('\\sum_{n=1}^{4}(n^4)').evaluate().toString()
+    ).toMatchInlineSnapshot(`354`);
+  });
+
+  it('should evaluate sum of fifth powers numerically', () => {
+    // 1^5 + 2^5 + 3^5 + 4^5 = 1 + 32 + 243 + 1024 = 1300
+    expect(
+      ce.parse('\\sum_{n=1}^{4}(n^5)').evaluate().toString()
+    ).toMatchInlineSnapshot(`1300`);
+  });
+
+  // Weighted squared binomial sum: Sum(k^2 * C(n,k), [k, 0, n]) = n(n+1) * 2^(n-2)
+  it('should simplify weighted squared binomial sum', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', 'k', 2], ['Binomial', 'b', 'k']],
+          ['Tuple', 'k', 0, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`b * (b + 1) * 2^(b - 2)`);
+  });
+
+  it('should evaluate weighted squared binomial sum', () => {
+    // 0^2*C(4,0) + 1^2*C(4,1) + 2^2*C(4,2) + 3^2*C(4,3) + 4^2*C(4,4) = 0 + 4 + 24 + 36 + 16 = 80 = 4*5*2^2
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', 'k', 2], ['Binomial', 4, 'k']],
+          ['Tuple', 'k', 0, 4],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`80`);
+  });
+
+  // Weighted cubed binomial sum: Sum(k^3 * C(n,k), [k, 0, n]) = n²(n+3) * 2^(n-3)
+  it('should simplify weighted cubed binomial sum', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', 'k', 3], ['Binomial', 'b', 'k']],
+          ['Tuple', 'k', 0, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`(b + 3) * b^2 * 2^(b - 3)`);
+  });
+
+  it('should evaluate weighted cubed binomial sum', () => {
+    // 0 + 1*4 + 8*6 + 27*4 + 64*1 = 0 + 4 + 48 + 108 + 64 = 224 = 16*7*2
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', 'k', 3], ['Binomial', 4, 'k']],
+          ['Tuple', 'k', 0, 4],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`224`);
+  });
+
+  // General arithmetic progression: Sum(a + d*n, [n, m, b])
+  it('should simplify arithmetic progression with non-zero lower bound', () => {
+    // Sum(3n+5, [n, 1, b]) = (b)(5 + 3(1+b)/2) = 3b(b+1)/2 + 5b
+    expect(
+      ce.parse('\\sum_{n=1}^{b}(3n + 5)').simplify().toString()
+    ).toMatchInlineSnapshot(`3/2 * b * (b + 1) + 5b`);
+  });
+
+  it('should evaluate arithmetic progression with non-zero lower bound', () => {
+    // 8 + 11 + 14 + 17 = 50
+    expect(
+      ce.parse('\\sum_{n=1}^{4}(3n + 5)').evaluate().toString()
+    ).toMatchInlineSnapshot(`50`);
+  });
+
+  // Alternating weighted binomial: Sum((-1)^k * k * C(n,k)) = 0 for n >= 2
+  it('should simplify alternating weighted binomial sum to 0', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', -1, 'k'], 'k', ['Binomial', 'b', 'k']],
+          ['Tuple', 'k', 0, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`0`);
+  });
+
+  it('should evaluate alternating weighted binomial sum', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', ['Power', -1, 'k'], 'k', ['Binomial', 4, 'k']],
+          ['Tuple', 'k', 0, 4],
+        ])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`0`);
+  });
+
+  // Sum of binomial squares: Sum(C(n,k)^2) = C(2n, n)
+  it('should simplify sum of binomial squares', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Power', ['Binomial', 'b', 'k'], 2],
+          ['Tuple', 'k', 0, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`Binomial(2b, b)`);
+  });
+
+  it('should evaluate sum of binomial squares', () => {
+    // C(8,4) = 70
+    expect(
+      ce
+        .box(['Sum', ['Power', ['Binomial', 4, 'k'], 2], ['Tuple', 'k', 0, 4]])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`70`);
+  });
+
+  // Sum of k*(k+1): n(n+1)(n+2)/3
+  it('should simplify sum of k*(k+1)', () => {
+    expect(
+      ce
+        .box([
+          'Sum',
+          ['Multiply', 'k', ['Add', 'k', 1]],
+          ['Tuple', 'k', 1, 'b'],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`1/3 * b^3 + b^2 + 2/3 * b`);
+  });
+
+  it('should evaluate sum of k*(k+1)', () => {
+    // 4*5*6/3 = 40
+    expect(
+      ce
+        .box(['Sum', ['Multiply', 'k', ['Add', 'k', 1]], ['Tuple', 'k', 1, 4]])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`40`);
+  });
+});
+
+describe('PRODUCT', () => {
+  it('should compute the product of a collection', () =>
+    expect(
+      ce
+        .box(['Product', ['Range', 1, 5]])
+        .evaluate()
+        .toString()
+    ).toMatchInlineSnapshot(`120`));
+
+  it('should compute the product of a function over an interval', () =>
+    expect(
+      ce
+        .box(['Product', 'n', ['Tuple', 'n', 1, 5]])
+        .evaluate()
+        .toString()
+    ).toMatchInlineSnapshot(`120`));
+
+  // Regression tests for issue #252: Product with free variables
+  it('should handle product with free variable (issue #252)', () =>
+    expect(
+      ce.parse('\\prod_{n=1}^{5}(x)').evaluate().toString()
+    ).toMatchInlineSnapshot(`x^5`));
+
+  it('should handle product with mixed index and free variable (issue #252)', () =>
+    expect(
+      ce.parse('\\prod_{n=1}^{3}(n \\cdot x)').evaluate().toString()
+    ).toMatchInlineSnapshot(`6x^3`));
+
+  // Simplification of Product with symbolic bounds
+  it('should simplify product of constant with symbolic bounds', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(x)').simplify().toString()
+    ).toMatchInlineSnapshot(`x^b`);
+  });
+
+  it('should simplify product of index (factorial)', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(n)').simplify().toString()
+    ).toMatchInlineSnapshot(`b!`);
+  });
+
+  // Shifted factorial: Product(n+c, [n, 1, b]) = (b+c)!/c!
+  it('should simplify product with index shift (n+1)', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(n+1)').simplify().toString()
+    ).toMatchInlineSnapshot(`(b + 1)! / 1!`);
+  });
+
+  it('should evaluate product with index shift (n+1)', () => {
+    // 2*3*4*5 = 120
+    expect(
+      ce.parse('\\prod_{n=1}^{4}(n+1)').evaluate().toString()
+    ).toMatchInlineSnapshot(`120`);
+  });
+
+  it('should simplify product with larger index shift (n+3)', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(n+3)').simplify().toString()
+    ).toMatchInlineSnapshot(`(b + 3)! / 3!`);
+  });
+
+  it('should evaluate product with larger index shift (n+3)', () => {
+    // 4*5*6*7 = 840
+    expect(
+      ce.parse('\\prod_{n=1}^{4}(n+3)').evaluate().toString()
+    ).toMatchInlineSnapshot(`840`);
+  });
+
+  it('should factor out constant from product', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(3n)').simplify().toString()
+    ).toMatchInlineSnapshot(`b! * 3^b`);
+  });
+
+  it('should factor out symbolic constant from product', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(x \\cdot n)').simplify().toString()
+    ).toMatchInlineSnapshot(`b! * x^b`);
+  });
+
+  // Double factorial formulas
+  it('should simplify odd double factorial prod(2n-1)', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(2n-1)').simplify().toString()
+    ).toMatchInlineSnapshot(`Factorial2(2b - 1)`);
+  });
+
+  it('should evaluate odd double factorial', () => {
+    // 1 * 3 * 5 = 15
+    expect(
+      ce.parse('\\prod_{n=1}^{3}(2n-1)').simplify().toString()
+    ).toMatchInlineSnapshot(`Factorial2(5)`);
+  });
+
+  it('should simplify even double factorial prod(2n)', () => {
+    expect(
+      ce.parse('\\prod_{n=1}^{b}(2n)').simplify().toString()
+    ).toMatchInlineSnapshot(`b! * 2^b`);
+  });
+
+  it('should evaluate even double factorial', () => {
+    // 2 * 4 * 6 = 48
+    expect(
+      ce.parse('\\prod_{n=1}^{3}(2n)').evaluate().toString()
+    ).toMatchInlineSnapshot(`48`);
+  });
+
+  // Rising factorial (Pochhammer)
+  it('should simplify rising factorial to Pochhammer', () => {
+    expect(
+      ce
+        .box([
+          'Product',
+          ['Add', 'x', 'k'],
+          ['Limits', 'k', 0, ['Subtract', 'b', 1]],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`Pochhammer(x, b)`);
+  });
+
+  it('should evaluate rising factorial', () => {
+    // (3)_4 = 3*4*5*6 = 360
+    expect(
+      ce
+        .box(['Product', ['Add', 3, 'k'], ['Limits', 'k', 0, 3]])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`360`);
+  });
+
+  // Falling factorial
+  it('should simplify falling factorial', () => {
+    expect(
+      ce
+        .box([
+          'Product',
+          ['Subtract', 'x', 'k'],
+          ['Limits', 'k', 0, ['Subtract', 'b', 1]],
+        ])
+        .simplify()
+        .toString()
+    ).toMatchInlineSnapshot(`x! / (-b + x)!`);
+  });
+
+  it('should evaluate falling factorial', () => {
+    // 5 falling 3 = 5*4*3 = 60
+    expect(
+      ce
+        .box(['Product', ['Subtract', 5, 'k'], ['Limits', 'k', 0, 2]])
+        .evaluate()
+        ?.toString()
+    ).toMatchInlineSnapshot(`60`);
+  });
+
+  // Edge cases
+  it('should return 1 for empty product range', () => {
+    expect(
+      ce.parse('\\prod_{n=5}^{1}(n)').simplify().toString()
+    ).toMatchInlineSnapshot(`1`);
+  });
+
+  it('should return body value for single iteration product', () => {
+    expect(
+      ce.parse('\\prod_{n=5}^{5}(2n)').simplify().toString()
+    ).toMatchInlineSnapshot(`10`);
+  });
+
+  // Telescoping product: Product((k+1)/k) = b+1
+  it('should simplify telescoping product (k+1)/k', () => {
+    expect(
+      ce.parse('\\prod_{k=1}^{b}\\frac{k+1}{k}').simplify().toString()
+    ).toMatchInlineSnapshot(`b + 1`);
+  });
+
+  it('should evaluate telescoping product (k+1)/k', () => {
+    // (2/1)*(3/2)*(4/3)*(5/4) = 5
+    expect(
+      ce.parse('\\prod_{k=1}^{4}\\frac{k+1}{k}').evaluate().toString()
+    ).toMatchInlineSnapshot(`5`);
+  });
+
+  // Wallis-like product: Product(1 - 1/k^2) = (b+1)/(2b) = 1/(2b) + 1/2
+  it('should simplify Wallis-like product 1 - 1/k^2', () => {
+    expect(
+      ce.parse('\\prod_{k=2}^{b}(1 - \\frac{1}{k^2})').simplify().toString()
+    ).toMatchInlineSnapshot(`1 / (2b) + 1/2`);
+  });
+
+  it('should evaluate Wallis-like product 1 - 1/k^2', () => {
+    // (1-1/4)*(1-1/9)*(1-1/16) = (3/4)*(8/9)*(15/16) = 5/8 = 0.625
+    expect(
+      ce.parse('\\prod_{k=2}^{4}(1 - \\frac{1}{k^2})').evaluate().toString()
+    ).toMatchInlineSnapshot(`0.625`);
+  });
 });
 
 describe('GCD/LCM', () => {
@@ -820,4 +1470,99 @@ describe('FACTOR', () => {
         .evaluate()
         .toString()
     ).toMatchInlineSnapshot(`3sqrt(3) * x`));
+});
+
+// Tests for special functions type signatures (Issue #1 from TODO.md)
+// These functions now have proper type signatures, allowing them to be used
+// in expressions without type errors.
+describe('SPECIAL FUNCTIONS TYPE SIGNATURES', () => {
+  // Single-argument special functions
+  test('Zeta function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['Zeta', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`Zeta(x) + 1`);
+  });
+
+  test('LambertW function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['LambertW', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`LambertW(x) + 1`);
+  });
+
+  test('AiryAi function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['AiryAi', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`AiryAi(x) + 1`);
+  });
+
+  test('AiryBi function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['AiryBi', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`AiryBi(x) + 1`);
+  });
+
+  // Two-argument special functions
+  test('Beta function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['Beta', 'a', 'b']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`Beta(a, b) + 1`);
+  });
+
+  // Bessel functions (order, value)
+  test('BesselJ function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['BesselJ', 0, 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`BesselJ(0, x) + 1`);
+  });
+
+  test('BesselY function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['BesselY', 1, 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`BesselY(1, x) + 1`);
+  });
+
+  test('BesselI function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['BesselI', 2, 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`BesselI(2, x) + 1`);
+  });
+
+  test('BesselK function can be used in expressions', () => {
+    const expr = ce.box(['Add', 1, ['BesselK', 0, 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`BesselK(0, x) + 1`);
+  });
+
+  // Test that these functions work with symbolic order for Bessel
+  test('BesselJ with symbolic order', () => {
+    const expr = ce.box(['BesselJ', 'n', 'x']);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`BesselJ(n, x)`);
+  });
+
+  // Test composition with other functions
+  test('Special functions can be composed', () => {
+    const expr = ce.box(['Multiply', ['Zeta', 2], ['LambertW', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`LambertW(x) * Zeta(2)`);
+  });
+
+  // Test that existing special functions still work
+  test('Digamma function still works', () => {
+    const expr = ce.box(['Add', 1, ['Digamma', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`Digamma(x) + 1`);
+  });
+
+  test('Trigamma function still works', () => {
+    const expr = ce.box(['Add', 1, ['Trigamma', 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`Trigamma(x) + 1`);
+  });
+
+  test('PolyGamma function still works', () => {
+    const expr = ce.box(['Add', 1, ['PolyGamma', 2, 'x']]);
+    expect(expr.isValid).toBe(true);
+    expect(expr.toString()).toMatchInlineSnapshot(`PolyGamma(2, x) + 1`);
+  });
 });

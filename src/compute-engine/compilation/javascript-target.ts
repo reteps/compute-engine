@@ -1,4 +1,5 @@
 import type { BoxedExpression } from '../global-types';
+import type { MathJsonSymbol } from '../../math-json/types';
 
 import { chop, factorial, gcd, lcm, limit } from '../numerics/numeric';
 import { gamma, gammaln } from '../numerics/special-functions';
@@ -58,35 +59,35 @@ const JAVASCRIPT_FUNCTIONS: CompiledFunctions = {
     return `(${args.map((x) => compile(x)).join(' + ')})`;
   },
   Arccos: 'Math.acos',
-  Arccosh: 'Math.acosh',
+  Arcosh: 'Math.acosh',
   Arccot: ([x], compile) => {
     if (x === null) throw new Error('Arccot: no argument');
     return `Math.atan(1 / (${compile(x)}))`;
   },
-  Arccoth: ([x], compile) => {
-    if (x === null) throw new Error('Arccoth: no argument');
+  Arcoth: ([x], compile) => {
+    if (x === null) throw new Error('Arcoth: no argument');
     return `Math.atanh(1 / (${compile(x)}))`;
   },
   Arccsc: ([x], compile) => {
     if (x === null) throw new Error('Arccsc: no argument');
     return `Math.asin(1 / (${compile(x)}))`;
   },
-  Arccsch: ([x], compile) => {
-    if (x === null) throw new Error('Arccsch: no argument');
+  Arcsch: ([x], compile) => {
+    if (x === null) throw new Error('Arcsch: no argument');
     return `Math.asinh(1 / (${compile(x)}))`;
   },
   Arcsec: ([x], compile) => {
     if (x === null) throw new Error('Arcsec: no argument');
     return `Math.acos(1 / (${compile(x)}))`;
   },
-  Arcsech: ([x], compile) => {
-    if (x === null) throw new Error('Arcsech: no argument');
+  Arsech: ([x], compile) => {
+    if (x === null) throw new Error('Arsech: no argument');
     return `Math.acosh(1 / (${compile(x)}))`;
   },
   Arcsin: 'Math.asin',
-  Arcsinh: 'Math.asinh',
+  Arsinh: 'Math.asinh',
   Arctan: 'Math.atan',
-  Arctanh: 'Math.atanh',
+  Artanh: 'Math.atanh',
   Ceiling: 'Math.ceil',
   Chop: '_SYS.chop',
   Cos: 'Math.cos',
@@ -396,7 +397,7 @@ export class JavaScriptTarget implements LanguageTarget {
     expr: BoxedExpression,
     options: CompilationOptions = {}
   ): CompiledExecutable {
-    const { functions, vars, imports = [], preamble } = options;
+    const { operators, functions, vars, imports = [], preamble } = options;
     const unknowns = expr.unknowns;
 
     // Process imports
@@ -427,7 +428,22 @@ export class JavaScriptTarget implements LanguageTarget {
       }
     }
 
+    // Create operator lookup function
+    const operatorLookup = (op: MathJsonSymbol) => {
+      // Check custom operators first
+      if (operators) {
+        const customOp =
+          typeof operators === 'function'
+            ? operators(op)
+            : operators[op as keyof typeof operators];
+        if (customOp) return customOp;
+      }
+      // Fall back to default JavaScript operators
+      return JAVASCRIPT_OPERATORS[op];
+    };
+
     const target = this.createTarget({
+      operators: operatorLookup,
       functions: (id) =>
         namedFunctions?.[id] ? namedFunctions[id] : JAVASCRIPT_FUNCTIONS[id],
       var: (id) => {

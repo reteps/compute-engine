@@ -5,7 +5,7 @@ import {
   ComputeEngine,
   Rule,
 } from '../../src/compute-engine';
-import { Fu } from '../../src/compute-engine/boxed-expression/trigonometry.ts';
+import { fu } from '../../src/compute-engine/symbolic/fu';
 import { Expression } from '../../src/math-json/types.ts';
 import { simplify, exprToString } from '../utils';
 
@@ -453,6 +453,18 @@ const RULE_TEST_CASES: TestCase[] = [
   [
     `
                //
+               // Nested Roots
+               //
+             `,
+  ],
+  ['\\sqrt{\\sqrt{x}}', '\\sqrt[4]{x}'], // 👍 sqrt(sqrt(x)) -> x^{1/4}
+  ['\\sqrt[3]{\\sqrt{x}}', '\\sqrt[6]{x}'], // 👍 root(sqrt(x), 3) -> x^{1/6}
+  ['\\sqrt{\\sqrt[3]{x}}', '\\sqrt[6]{x}'], // 👍 sqrt(root(x, 3)) -> x^{1/6}
+  ['\\sqrt[3]{\\sqrt[4]{x}}', '\\sqrt[12]{x}'], // 👍 root(root(x, 4), 3) -> x^{1/12}
+  ['\\sqrt[4]{\\sqrt[4]{x}}', '\\sqrt[16]{x}'], // 👍 root(root(x, 4), 4) -> x^{1/16}
+  [
+    `
+               //
                // Double Powers
                //
              `,
@@ -477,7 +489,7 @@ const RULE_TEST_CASES: TestCase[] = [
                //
              `,
   ],
-  ['x/(-2)', '-1/2*x'], // 🙁 1/-2 * x
+  ['x/(-2)', '-1/2*x'],
   [
     `
                //
@@ -654,10 +666,11 @@ const RULE_TEST_CASES: TestCase[] = [
 
   ['|x|^4', 'x^4'], // 👍 |x|^{n:even}->x^n
   ['|x^2|', 'x^2'], // 👍 |x^{n:even}|->x^n
-  ['|x^3|', '|x|^3'], // 👍 |x^n|->|x|^n
-  ['|x^{3/5}|', '|x|^{3/5}'], // 👍 |x^n|->|x|^n
+  ['|x^3|', '|x|^3'], // 👍 |x^n|->|x|^n (odd exponent)
+  ['|x^{3/5}|', '|x|^{3/5}'], // 👍 |x^n|->|x|^n (odd numerator)
+  ['|x^{2/3}|', 'x^{2/3}'], // 👍 |x^n|->x^n (even numerator)
+  ['|x^{4/5}|', 'x^{4/5}'], // 👍 |x^n|->x^n (even numerator)
   ['|-|-x||', '|x|'], // 👍 |-x| -> |x|
-  ['|x^{3/5}|', '|x|^{3/5}'], // 👍 |x^n|->|x|^n
 
   [
     `
@@ -1603,6 +1616,31 @@ describe('SIMPLIFY', () => {
     ));
 });
 
+describe('POLYNOMIAL DIVISION REGRESSION', () => {
+  // Regression test for infinite recursion bug in polynomial cancellation
+  // Bug: simplify rule called cancelCommonFactors -> polynomialGCD ->
+  // polynomialDivide -> .simplify() -> infinite loop
+  test('Division with single variable should not stack overflow', () =>
+    expect(simplify('\\frac{n}{\\pi}')).toMatchInlineSnapshot(
+      `["Divide", "n", "Pi"]`
+    ));
+
+  test('Division with variable and constant denominator', () =>
+    expect(simplify('\\frac{x}{5}')).toMatchInlineSnapshot(
+      `["Multiply", ["Rational", 1, 5], "x"]`
+    ));
+
+  // Test that actual polynomial cancellation still works
+  test('Cancel common polynomial factors (x-1)', () =>
+    expect(simplify('\\frac{(x-1)(x+2)}{(x-1)(x+3)}')).toMatchInlineSnapshot(`
+      [
+        "Add",
+        ["Divide", "x", ["Add", "x", 3]],
+        ["Divide", 2, ["Add", "x", 3]]
+      ]
+    `));
+});
+
 describe('RELATIONAL OPERATORS', () => {
   // Simplify common coefficient
   test(`2a < 4b`, () =>
@@ -1622,38 +1660,365 @@ describe('RELATIONAL OPERATORS', () => {
     ));
 });
 
-//
-// Fu Test
-//
+describe('TRIGONOMETRIC PERIODICITY REDUCTION', () => {
+  // Test sin periodicity (period 2π)
+  test('sin(5π + k) = -sin(k)', () =>
+    expect(simplify('\\sin(5\\pi + k)')).toMatchInlineSnapshot(
+      `["Negate", ["Sin", "k"]]`
+    ));
 
-const testHelper = (a: string, b: string) => {
-  test(a, () => expect(Fu(ce.parse(a))).toBe(ce.parse(b)));
+  test('sin(4π + k) = sin(k)', () =>
+    expect(simplify('\\sin(4\\pi + k)')).toMatchInlineSnapshot(`["Sin", "k"]`));
+
+  test('sin(3π + k) = -sin(k)', () =>
+    expect(simplify('\\sin(3\\pi + k)')).toMatchInlineSnapshot(
+      `["Negate", ["Sin", "k"]]`
+    ));
+
+  // Test cos periodicity (period 2π)
+  test('cos(5π + k) = -cos(k)', () =>
+    expect(simplify('\\cos(5\\pi + k)')).toMatchInlineSnapshot(
+      `["Negate", ["Cos", "k"]]`
+    ));
+
+  test('cos(4π + k) = cos(k)', () =>
+    expect(simplify('\\cos(4\\pi + k)')).toMatchInlineSnapshot(`["Cos", "k"]`));
+
+  test('cos(2π + k) = cos(k)', () =>
+    expect(simplify('\\cos(2\\pi + k)')).toMatchInlineSnapshot(`["Cos", "k"]`));
+
+  // Test tan periodicity (period π)
+  test('tan(3π + k) = tan(k)', () =>
+    expect(simplify('\\tan(3\\pi + k)')).toMatchInlineSnapshot(`["Tan", "k"]`));
+
+  test('tan(2π + k) = tan(k)', () =>
+    expect(simplify('\\tan(2\\pi + k)')).toMatchInlineSnapshot(`["Tan", "k"]`));
+
+  test('tan(π + k) = tan(k)', () =>
+    expect(simplify('\\tan(\\pi + k)')).toMatchInlineSnapshot(`["Tan", "k"]`));
+
+  // Test cot periodicity (period π)
+  test('cot(3π + k) = cot(k)', () =>
+    expect(simplify('\\cot(3\\pi + k)')).toMatchInlineSnapshot(`["Cot", "k"]`));
+
+  // Test with negative multiples of π
+  test('sin(-3π + k) = -sin(k)', () =>
+    expect(simplify('\\sin(-3\\pi + k)')).toMatchInlineSnapshot(
+      `["Negate", ["Sin", "k"]]`
+    ));
+
+  test('cos(-4π + k) = cos(k)', () =>
+    expect(simplify('\\cos(-4\\pi + k)')).toMatchInlineSnapshot(
+      `["Cos", "k"]`
+    ));
+});
+
+describe('PYTHAGOREAN IDENTITIES', () => {
+  // Basic sin²(x) + cos²(x) = 1
+  test('sin²(x) + cos²(x) = 1', () =>
+    expect(simplify('\\sin(x)^2 + \\cos(x)^2')).toMatchInlineSnapshot(`1`));
+
+  test('cos²(x) + sin²(x) = 1 (reversed order)', () =>
+    expect(simplify('\\cos(x)^2 + \\sin(x)^2')).toMatchInlineSnapshot(`1`));
+
+  test('sin²(2x) + cos²(2x) = 1 (complex argument)', () =>
+    expect(simplify('\\sin(2x)^2 + \\cos(2x)^2')).toMatchInlineSnapshot(`1`));
+
+  // Subtraction forms
+  test('1 - sin²(x) = cos²(x)', () =>
+    expect(simplify('1 - \\sin(x)^2')).toMatchInlineSnapshot(
+      `["Square", ["Cos", "x"]]`
+    ));
+
+  test('1 - cos²(x) = sin²(x)', () =>
+    expect(simplify('1 - \\cos(x)^2')).toMatchInlineSnapshot(
+      `["Square", ["Sin", "x"]]`
+    ));
+
+  test('sin²(x) - 1 = -cos²(x)', () =>
+    expect(simplify('\\sin(x)^2 - 1')).toMatchInlineSnapshot(
+      `["Negate", ["Square", ["Cos", "x"]]]`
+    ));
+
+  test('cos²(x) - 1 = -sin²(x)', () =>
+    expect(simplify('\\cos(x)^2 - 1')).toMatchInlineSnapshot(
+      `["Negate", ["Square", ["Sin", "x"]]]`
+    ));
+
+  // Negated form
+  test('-sin²(x) - cos²(x) = -1', () =>
+    expect(simplify('-\\sin(x)^2 - \\cos(x)^2')).toMatchInlineSnapshot(`-1`));
+
+  // Tan/Sec identities
+  test('tan²(x) + 1 = sec²(x)', () =>
+    expect(simplify('\\tan(x)^2 + 1')).toMatchInlineSnapshot(
+      `["Square", ["Sec", "x"]]`
+    ));
+
+  test('sec²(x) - 1 = tan²(x)', () =>
+    expect(simplify('\\sec(x)^2 - 1')).toMatchInlineSnapshot(
+      `["Square", ["Tan", "x"]]`
+    ));
+
+  // Cot/Csc identities
+  test('1 + cot²(x) = csc²(x)', () =>
+    expect(simplify('1 + \\cot(x)^2')).toMatchInlineSnapshot(
+      `["Square", ["Csc", "x"]]`
+    ));
+
+  test('csc²(x) - 1 = cot²(x)', () =>
+    expect(simplify('\\csc(x)^2 - 1')).toMatchInlineSnapshot(
+      `["Square", ["Cot", "x"]]`
+    ));
+
+  // With coefficient
+  test('a·sin²(x) + a·cos²(x) = a', () =>
+    expect(simplify('a * \\sin(x)^2 + a * \\cos(x)^2')).toMatchInlineSnapshot(
+      `a`
+    ));
+});
+
+describe('NEGATIVE BASE POWER RULES', () => {
+  // Even integer exponents: (-x)^{even} -> x^{even}
+  test('(-x)^2 = x^2', () =>
+    expect(simplify('(-x)^2')).toMatchInlineSnapshot(`["Square", "x"]`));
+
+  test('(-x)^4 = x^4', () =>
+    expect(simplify('(-x)^4')).toMatchInlineSnapshot(`["Power", "x", 4]`));
+
+  // Odd integer exponents: (-x)^{odd} -> -(x^{odd})
+  test('(-x)^3 = -x^3', () =>
+    expect(simplify('(-x)^3')).toMatchInlineSnapshot(
+      `["Negate", ["Power", "x", 3]]`
+    ));
+
+  test('(-x)^5 = -x^5', () =>
+    expect(simplify('(-x)^5')).toMatchInlineSnapshot(
+      `["Negate", ["Power", "x", 5]]`
+    ));
+
+  // Rational exponents: even/odd -> positive, odd/odd -> negative
+  test('(-x)^{4/3} = x^{4/3}', () =>
+    expect(simplify('(-x)^{4/3}')).toMatchInlineSnapshot(
+      `["Power", "x", ["Rational", 4, 3]]`
+    ));
+
+  test('(-x)^{3/5} = -x^{3/5}', () =>
+    expect(simplify('(-x)^{3/5}')).toMatchInlineSnapshot(
+      `["Negate", ["Power", "x", ["Rational", 3, 5]]]`
+    ));
+});
+
+describe('LOGARITHM COMBINATION RULES', () => {
+  // Addition: ln(x) + ln(y) -> ln(xy)
+  test('ln(x) + ln(y) = ln(xy)', () =>
+    expect(simplify('\\ln(x) + \\ln(y)')).toMatchInlineSnapshot(
+      `["Ln", ["Multiply", "x", "y"]]`
+    ));
+
+  test('ln(a) + ln(b) + ln(c) = ln(abc)', () =>
+    expect(simplify('\\ln(a) + \\ln(b) + \\ln(c)')).toMatchInlineSnapshot(
+      `["Ln", ["Multiply", "a", "b", "c"]]`
+    ));
+
+  // Subtraction: ln(x) - ln(y) -> ln(x/y)
+  test('ln(x) - ln(y) = ln(x/y)', () =>
+    expect(simplify('\\ln(x) - \\ln(y)')).toMatchInlineSnapshot(
+      `["Ln", ["Divide", "x", "y"]]`
+    ));
+
+  test('ln(xy) - ln(x) = ln(y)', () =>
+    expect(simplify('\\ln(xy) - \\ln(x)')).toMatchInlineSnapshot(
+      `["Ln", "y"]`
+    ));
+
+  test('ln(y/x) + ln(x) = ln(y)', () =>
+    expect(simplify('\\ln(y/x) + \\ln(x)')).toMatchInlineSnapshot(
+      `["Ln", "y"]`
+    ));
+
+  // Combined: ln(a) + ln(b) - ln(c) -> ln(ab/c)
+  test('ln(a) + ln(b) - ln(c) = ln(ab/c)', () =>
+    expect(simplify('\\ln(a) + \\ln(b) - \\ln(c)')).toMatchInlineSnapshot(
+      `["Ln", ["Divide", ["Multiply", "a", "b"], "c"]]`
+    ));
+
+  // Log with base: log_c(x) + log_c(y) -> log_c(xy)
+  test('log_2(x) + log_2(y) = log_2(xy)', () =>
+    expect(simplify('\\log_2(x) + \\log_2(y)')).toMatchInlineSnapshot(
+      `["Log", ["Multiply", "x", "y"], 2]`
+    ));
+
+  test('log_2(x) - log_2(y) = log_2(x/y)', () =>
+    expect(simplify('\\log_2(x) - \\log_2(y)')).toMatchInlineSnapshot(
+      `["Log", ["Divide", "x", "y"], 2]`
+    ));
+
+  test('log_c(xy) - log_c(x) = log_c(y)', () =>
+    expect(simplify('\\log_c(xy) - \\log_c(x)')).toMatchInlineSnapshot(
+      `["Log", "y", "c"]`
+    ));
+
+  // Mixed with other terms
+  test('ln(x) + ln(y) + z = z + ln(xy)', () =>
+    expect(simplify('\\ln(x) + \\ln(y) + z')).toMatchInlineSnapshot(
+      `["Add", "z", ["Ln", ["Multiply", "x", "y"]]]`
+    ));
+});
+
+describe('INDETERMINATE FORMS', () => {
+  test('0 * infinity = NaN', () =>
+    expect(simplify('0 \\times \\infty')).toMatchInlineSnapshot(`NaN`));
+
+  test('0 * (-infinity) = NaN', () =>
+    expect(simplify('0 \\times (-\\infty)')).toMatchInlineSnapshot(`NaN`));
+
+  test('infinity * 0 = NaN', () =>
+    expect(simplify('\\infty \\times 0')).toMatchInlineSnapshot(`NaN`));
+
+  test('(-infinity) * 0 = NaN', () =>
+    expect(simplify('(-\\infty) \\times 0')).toMatchInlineSnapshot(`NaN`));
+
+  test('infinity / infinity = NaN', () =>
+    expect(simplify('\\frac{\\infty}{\\infty}')).toMatchInlineSnapshot(`NaN`));
+
+  test('(-infinity) / infinity = NaN', () =>
+    expect(simplify('\\frac{-\\infty}{\\infty}')).toMatchInlineSnapshot(`NaN`));
+
+  test('infinity / (-infinity) = NaN', () =>
+    expect(simplify('\\frac{\\infty}{-\\infty}')).toMatchInlineSnapshot(`NaN`));
+
+  test('(-infinity) / (-infinity) = NaN', () =>
+    expect(simplify('\\frac{-\\infty}{-\\infty}')).toMatchInlineSnapshot(
+      `NaN`
+    ));
+
+  test('infinity^0 = NaN', () =>
+    expect(simplify('\\infty^0')).toMatchInlineSnapshot(`NaN`));
+});
+
+//
+// Fu Algorithm Advanced Tests
+//
+// These tests cover advanced Fu algorithm functionality that requires
+// enhancements beyond the core implementation. See FU.md for the
+// implementation plan for each phase.
+//
+// Test categories:
+// - Phase 6: TR3 - Angle canonicalization (negative angles)
+// - Phase 7: TR4 - Special angle evaluation
+// - Phase 8: Period reduction (sin(x+π), cos(x+2π), etc.)
+// - Phase 9: TR7i - Inverse power reduction
+// - Phase 10: TR22i - Inverse Pythagorean identities
+// - Phase 11: Pythagorean identity in compound expressions
+// - Phase 12: Post-Fu arithmetic simplification
+// - Phase 13: TR9 enhancement - sum-to-product
+// - Phase 14: Complex multi-step simplifications (Fu paper examples)
+
+const fuTestHelper = (a: string, b: string) => {
+  // Use full simplify flow with Fu strategy to include post-Fu arithmetic simplification
+  const simplified = ce.parse(a).simplify({ strategy: 'fu' });
+  expect(simplified.isSame(ce.parse(b))).toBe(true);
 };
 
-describe.skip('Fu Test', () => {
-  let tests = [
-    ['2\\sin(x)\\cos(x)-\\sin(2x)', '0'],
-    ['\\sin^2(x)+\\cos^2(x)+2x', '1+2x'],
-    ['\\sec^2(x)-1', '\\tan^2(x)'],
-    ['\\cot^2(x)-\\csc^2(x)', '-1'],
-    ['2-2\\sin^2(x)', '2\\cos^2(x)'],
-    ['\\cos(-x)+\\cos(x)', '2\\cos(x)'],
-    ['\\sec(-x)\\cos(x)', '1'],
-    ['\\sin(x)\\cos(h+2\\pi)+\\sin(-h+\\pi)\\cos(-x)', '\\sin(x+h)'],
-    ['(1-\\cos(2x))/2', '\\sin^2(x)'],
-    ['(1+\\cos(2x))/2', '\\cos^2(x)'],
-    ['\\sin(x+\\pi)+2\\sin(x)', '\\sin(x)'],
-    ['\\tan(x)\\tan(-x)', '-\\tan^2(x)'],
-    ['\\sin(x+h)+\\sin(x-h)', '2\\cos(x)\\sin(h)'],
-    //From Fu's Paper
-    ['1-(1/4)*\\sin^2(2x)-\\sin^2(y)-\\cos^4(x)', '\\sin(x+y)\\sin(x-y)'],
-    ['\\cos(\\pi/9)*\\cos(2\\pi/9)*\\cos(3\\pi/9)*\\cos(4\\pi/9)', '1/16'],
-    [
+describe('Fu Advanced Tests', () => {
+  // Phase 12: Post-Fu arithmetic simplification ✓ IMPLEMENTED
+  // Fu correctly transforms 2sin(x)cos(x) to sin(2x), then standard
+  // simplification reduces sin(2x)-sin(2x) to 0
+  test('2sin(x)cos(x)-sin(2x) [Phase 12: post-Fu arithmetic]', () => {
+    fuTestHelper('2\\sin(x)\\cos(x)-\\sin(2x)', '0');
+  });
+
+  // Phase 11: Pythagorean identity in compound expressions ✓ IMPLEMENTED
+  // Need to detect sin²+cos² pairs within larger Add expressions
+  test('sin²(x)+cos²(x)+2x [Phase 11: Pythagorean in compounds]', () => {
+    fuTestHelper('\\sin^2(x)+\\cos^2(x)+2x', '1+2x');
+  });
+
+  // Phase 10: TR22i - Inverse Pythagorean identities ✓ IMPLEMENTED
+  test('sec²(x)-1 [Phase 10: TR22i inverse Pythagorean]', () => {
+    fuTestHelper('\\sec^2(x)-1', '\\tan^2(x)');
+  });
+
+  test('cot²(x)-csc²(x) [Phase 10: TR22i inverse Pythagorean]', () => {
+    fuTestHelper('\\cot^2(x)-\\csc^2(x)', '-1');
+  });
+
+  // Phase 11: Pythagorean identity in compound expressions ✓ IMPLEMENTED
+  // 2-2sin²(x) = 2(1-sin²(x)) = 2cos²(x)
+  test('2-2sin²(x) [Phase 11: Pythagorean with coefficients]', () => {
+    fuTestHelper('2-2\\sin^2(x)', '2\\cos^2(x)');
+  });
+
+  // Phase 6: TR3 - Angle canonicalization ✓ IMPLEMENTED
+  // cos(-x) = cos(x) since cosine is even
+  test('cos(-x)+cos(x) [Phase 6: TR3 angle canonicalization]', () => {
+    fuTestHelper('\\cos(-x)+\\cos(x)', '2\\cos(x)');
+  });
+
+  test('sec(-x)cos(x) [Phase 6: TR3 angle canonicalization]', () => {
+    fuTestHelper('\\sec(-x)\\cos(x)', '1');
+  });
+
+  test('tan(x)tan(-x) [Phase 6: TR3 angle canonicalization]', () => {
+    fuTestHelper('\\tan(x)\\tan(-x)', '-\\tan^2(x)');
+  });
+
+  // Phase 8: Period reduction + Phase 6: TR3 ✓ IMPLEMENTED
+  // cos(h+2π) = cos(h), sin(-h+π) = sin(h), cos(-x) = cos(x)
+  test('sin(x)cos(h+2π)+sin(-h+π)cos(-x) [Phase 6+8: TR3+period]', () => {
+    fuTestHelper(
+      '\\sin(x)\\cos(h+2\\pi)+\\sin(-h+\\pi)\\cos(-x)',
+      '\\sin(x+h)'
+    );
+  });
+
+  // Phase 9: TR7i - Inverse power reduction ✓ IMPLEMENTED
+  // (1-cos(2x))/2 = sin²(x) and (1+cos(2x))/2 = cos²(x)
+  test('(1-cos(2x))/2 [Phase 9: TR7i inverse power reduction]', () => {
+    fuTestHelper('(1-\\cos(2x))/2', '\\sin^2(x)');
+  });
+
+  test('(1+cos(2x))/2 [Phase 9: TR7i inverse power reduction]', () => {
+    fuTestHelper('(1+\\cos(2x))/2', '\\cos^2(x)');
+  });
+
+  // Phase 8: Period reduction ✓ IMPLEMENTED
+  // sin(x+π) = -sin(x), so sin(x+π)+2sin(x) = -sin(x)+2sin(x) = sin(x)
+  test('sin(x+π)+2sin(x) [Phase 8: period reduction]', () => {
+    fuTestHelper('\\sin(x+\\pi)+2\\sin(x)', '\\sin(x)');
+  });
+
+  // Phase 13: TR9 enhancement - sum-to-product ✓ IMPLEMENTED
+  // sin(x+h)+sin(x-h) = 2sin(x)cos(h)
+  test('sin(x+h)+sin(x-h) [Phase 13: TR9 sum-to-product]', () => {
+    fuTestHelper('\\sin(x+h)+\\sin(x-h)', '2\\sin(x)\\cos(h)');
+  });
+
+  // Phase 14: Complex multi-step simplifications from Fu's paper
+  test.skip('Fu paper: 1-(1/4)sin²(2x)-sin²(y)-cos⁴(x) [Phase 14]', () => {
+    fuTestHelper(
+      '1-(1/4)*\\sin^2(2x)-\\sin^2(y)-\\cos^4(x)',
+      '\\sin(x+y)\\sin(x-y)'
+    );
+  });
+
+  // Phase 7: TR4 - Special angle evaluation + TRmorrie ✓ IMPLEMENTED
+  test('Fu paper: cos(π/9)cos(2π/9)cos(3π/9)cos(4π/9) [Phase 7+TRmorrie]', () => {
+    fuTestHelper(
+      '\\cos(\\pi/9)*\\cos(2\\pi/9)*\\cos(3\\pi/9)*\\cos(4\\pi/9)',
+      '1/16'
+    );
+  });
+
+  // Phase 7: TR12i tangent sum identity ✓ IMPLEMENTED
+  // tan(A) + tan(B) - tan(C)·tan(A)·tan(B) = -tan(C) when A+B+C = π
+  test('Fu paper: tan sum with special angles [Phase 7+TR12i]', () => {
+    fuTestHelper(
       '\\tan(7\\pi/18)+\\tan(5\\pi/18)-\\sqrt{3}\\tan(5\\pi/18)\\tan(7\\pi/18)',
-      '-\\sqrt{3}',
-    ],
-  ];
-  tests.forEach(([a, b]) => testHelper(a, b));
+      '-\\sqrt{3}'
+    );
+  });
 });
 
 function escape(s: string): string {

@@ -95,6 +95,7 @@ const OPEN_DELIMITER_PREFIX = {
   '\\Big': '\\Big',
   '\\bigg': '\\bigg',
   '\\Bigg': '\\Bigg',
+  '\\mathopen': '\\mathclose',
 };
 
 /** Commands that can be used with a middle delimiter */
@@ -194,6 +195,22 @@ export class _Parser implements Parser {
     if (id in this.symbolTable.ids && this.symbolTable.ids[id].is(type.type))
       throw new Error(`Symbol ${id} already declared as a different type`);
     this.symbolTable.ids[id] = type;
+  }
+
+  // Track whether we're inside a quantifier body (ForAll, Exists, etc.)
+  // When true, single uppercase letters followed by () are parsed as predicates
+  private _quantifierScopeDepth = 0;
+
+  get inQuantifierScope(): boolean {
+    return this._quantifierScopeDepth > 0;
+  }
+
+  enterQuantifierScope(): void {
+    this._quantifierScopeDepth++;
+  }
+
+  exitQuantifierScope(): void {
+    if (this._quantifierScopeDepth > 0) this._quantifierScopeDepth--;
   }
 
   get index(): number {
@@ -296,6 +313,13 @@ export class _Parser implements Parser {
     return BoxedType.unknown;
   }
 
+  hasSubscriptEvaluate(id: MathJsonSymbol): boolean {
+    // Check if the symbol has a custom subscript evaluation handler
+    if (this.options.hasSubscriptEvaluate)
+      return this.options.hasSubscriptEvaluate(id);
+    return false;
+  }
+
   get peek(): LatexToken {
     const peek = this._tokens[this.index];
     if (peek === this._lastPeek) this._peekCounter += 1;
@@ -364,6 +388,30 @@ export class _Parser implements Parser {
     const currentBoundary = this._boundaries[this._boundaries.length - 1];
     this._boundaries.pop();
     return this.error(msg, currentBoundary.index);
+  }
+
+  /**
+   * Performance optimization: determines if we can skip expensive re-parsing
+   * for matchfix boundary mismatches.
+   *
+   * We skip re-parsing only for specific non-ambiguous cases where we know
+   * the boundary mismatch is due to trying interval notation on regular parens.
+   * For example, trying (] on input () - we can safely skip without re-parsing.
+   *
+   * All other cases (including |, [, and other delimiters) require re-parsing
+   * to handle nested delimiters correctly.
+   */
+  private canSkipMatchfixReparsing(
+    openTrigger: string | undefined,
+    boundary: LatexToken[],
+    sameTrigger: boolean
+  ): boolean {
+    return (
+      !sameTrigger && // Not same open/close (e.g., not ||)
+      boundary.length === 1 && // No prefix like \right
+      (openTrigger === '(' || openTrigger === '\\lparen') && // Only for (
+      (boundary[0] === ']' || boundary[0] === '\\rbrack') // Only when expecting ]
+    );
   }
 
   latex(start: number, end?: number): string {
@@ -439,29 +487,87 @@ export class _Parser implements Parser {
     if (this.atEnd) return [];
 
     const result: [IndexedLatexDictionaryEntry, number][] = [];
-    const defs = [...this.getDefs(kind)];
 
-    //
-    // Add any "universal" definitions (ones with an empty string for a trigger)
-    //
+    // Get the appropriate trigger index for this kind
+    let triggerIndex: Map<string, IndexedLatexDictionaryEntry[]> | undefined;
 
-    for (const def of defs) if (def.latexTrigger === '') result.push([def, 0]);
-
-    //
-    // Filter the definition matching the tokens ahead with a LaTeX trigger
-    //
-    for (const [n, tokens] of this.lookAhead()) {
-      for (const def of defs)
-        if (def.latexTrigger === tokens) result.push([def, n]);
+    switch (kind) {
+      case 'infix':
+        triggerIndex = this._dictionary.infixByTrigger;
+        break;
+      case 'prefix':
+        triggerIndex = this._dictionary.prefixByTrigger;
+        break;
+      case 'postfix':
+        triggerIndex = this._dictionary.postfixByTrigger;
+        break;
+      case 'function':
+        triggerIndex = this._dictionary.functionByTrigger;
+        break;
+      case 'symbol':
+        triggerIndex = this._dictionary.symbolByTrigger;
+        break;
+      case 'expression':
+        triggerIndex = this._dictionary.expressionByTrigger;
+        break;
+      case 'operator':
+        // 'operator' kind needs special handling - fall back to iteration
+        triggerIndex = undefined;
+        break;
     }
 
-    //
-    // Filter the definitions that match with a complex LaTeX symbol
-    //
-    for (const def of defs) {
-      if (def.symbolTrigger) {
-        const n = parseComplexId(this, def.symbolTrigger);
-        if (n > 0) result.push([def, n]);
+    if (triggerIndex) {
+      // OPTIMIZED PATH: Use trigger index for fast lookup
+
+      // Collect defs that need iteration (universal and symbolTrigger)
+      // Do this in a single pass to avoid multiple getDefs() calls
+      const defsNeedingIteration: IndexedLatexDictionaryEntry[] = [];
+      for (const def of this.getDefs(kind)) {
+        if (def.latexTrigger === '' || def.symbolTrigger) {
+          defsNeedingIteration.push(def);
+        }
+      }
+
+      // Add universal definitions (empty trigger)
+      for (const def of defsNeedingIteration) {
+        if (def.latexTrigger === '') result.push([def, 0]);
+      }
+
+      // Direct index lookup for latexTrigger matches - O(lookahead)
+      for (const [n, tokens] of this.lookAhead()) {
+        const defs = triggerIndex.get(tokens);
+        if (defs) {
+          for (const def of defs) result.push([def, n]);
+        }
+      }
+
+      // Process symbolTrigger defs
+      for (const def of defsNeedingIteration) {
+        if (def.symbolTrigger) {
+          const n = parseComplexId(this, def.symbolTrigger);
+          if (n > 0) result.push([def, n]);
+        }
+      }
+    } else {
+      // FALLBACK PATH: For 'operator' kind or if no index available
+      const defs = [...this.getDefs(kind)];
+
+      // Add universal definitions
+      for (const def of defs)
+        if (def.latexTrigger === '') result.push([def, 0]);
+
+      // Match latexTrigger
+      for (const [n, tokens] of this.lookAhead()) {
+        for (const def of defs)
+          if (def.latexTrigger === tokens) result.push([def, n]);
+      }
+
+      // Match symbolTrigger
+      for (const def of defs) {
+        if (def.symbolTrigger) {
+          const n = parseComplexId(this, def.symbolTrigger);
+          if (n > 0) result.push([def, n]);
+        }
       }
     }
 
@@ -730,20 +836,72 @@ export class _Parser implements Parser {
     open: Delimiter | LatexToken[],
     close: Delimiter | LatexToken[]
   ): boolean {
+    const start = this.index;
+
+    // Check for delimiter prefix like \left, \mathopen, etc.
+    const closePrefix = OPEN_DELIMITER_PREFIX[this.peek];
+    if (closePrefix) this.nextToken();
+
+    // Handle braced form: \mathopen{(} or \mathopen{\lbrack}
+    // After consuming the prefix, check if there's a braced delimiter
+    const hasBracedDelimiter = closePrefix && this.peek === '<{>';
+    if (hasBracedDelimiter) this.nextToken(); // consume the opening brace
+
     // If the delimiters are token arrays, look specifically for those
     if (Array.isArray(open)) {
       // If the open trigger is an array, the close trigger must be an array too
       console.assert(Array.isArray(close));
-      if (!this.matchAll(open)) return false;
-      this.addBoundary(close as LatexToken[]);
+
+      // For single-token array triggers, also check DELIMITER_SHORTHAND
+      // This allows ['['] to match both '[' and '\lbrack'
+      if (open.length === 1) {
+        const possibleTokens = DELIMITER_SHORTHAND[open[0]] ?? [open[0]];
+        if (!possibleTokens.includes(this.peek)) {
+          this.index = start;
+          return false;
+        }
+        // Check if we matched a LaTeX command variant (e.g., \lbrack for [)
+        const matchedToken = this.nextToken();
+        const useLatexCommand = matchedToken.startsWith('\\');
+
+        // Consume closing brace if we had a braced delimiter \mathopen{(}
+        if (hasBracedDelimiter && !this.match('<}>')) {
+          this.index = start;
+          return false;
+        }
+
+        // Find the corresponding close token variant
+        const closeTokens = DELIMITER_SHORTHAND[close[0] as string] ?? [
+          close[0],
+        ];
+        const closeToken = (closeTokens.find((t) =>
+          useLatexCommand ? t.startsWith('\\') : !t.startsWith('\\')
+        ) ?? closeTokens[0]) as LatexToken;
+
+        // Build the close boundary: for braced form, expect \mathclose{)}
+        const closeBoundary = closePrefix
+          ? hasBracedDelimiter
+            ? [closePrefix, '<{>', closeToken, '<}>']
+            : [closePrefix, closeToken]
+          : [closeToken];
+        this.addBoundary(closeBoundary);
+        return true;
+      }
+
+      // For multi-token array triggers, match exactly
+      if (!this.matchAll(open)) {
+        this.index = start;
+        return false;
+      }
+      // If there was a prefix, prepend the close prefix to the close tokens
+      const closeBoundary = closePrefix
+        ? [closePrefix, ...(close as LatexToken[])]
+        : (close as LatexToken[]);
+      this.addBoundary(closeBoundary);
       return true;
     }
 
     console.assert(!Array.isArray(close));
-
-    const start = this.index;
-    const closePrefix = OPEN_DELIMITER_PREFIX[this.peek];
-    if (closePrefix) this.nextToken();
 
     if (open === '||' && this.matchAll(['|', '|'])) {
       this.addBoundary(['|', '|']);
@@ -758,11 +916,23 @@ export class _Parser implements Parser {
 
     open = this.nextToken() as Delimiter;
 
+    // Consume closing brace if we had a braced delimiter \mathopen{(}
+    if (hasBracedDelimiter && !this.match('<}>')) {
+      this.index = start;
+      return false;
+    }
+
     // If we are using a shorthand delimiter, we need to add the
     // corresponding close delimiter.
     close = CLOSE_DELIMITER[open] ?? close;
 
-    this.addBoundary(closePrefix ? [closePrefix, close] : [close]);
+    // Build the close boundary: for braced form, expect \mathclose{)}
+    const closeBoundary = closePrefix
+      ? hasBracedDelimiter
+        ? [closePrefix, '<{>', close, '<}>']
+        : [closePrefix, close]
+      : [close];
+    this.addBoundary(closeBoundary);
     return true;
   }
 
@@ -1252,18 +1422,60 @@ export class _Parser implements Parser {
     // If we prefer to parse numbers as rationals, and there is no repeating part
     // we can return a rational number
     if (!hasRepeatingPart && this.options.parseNumbers === 'rational') {
-      const whole = parseInt(wholePart, 10);
+      // Check if the whole part exceeds MAX_SAFE_INTEGER
+      // Use BigInt arithmetic to preserve precision for large integers
+      const isLargeInteger =
+        wholePart.length > 16 ||
+        (wholePart.length === 16 && wholePart > '9007199254740991');
 
       if (!fractionalPart) {
+        if (isLargeInteger) {
+          // Use { num: string } format to preserve precision
+          const numStr = sign < 0 ? '-' + wholePart : wholePart;
+          if (exponent)
+            return ['Multiply', { num: numStr }, ['Power', 10, exponent]];
+          return { num: numStr };
+        }
+        const whole = parseInt(wholePart, 10);
         if (exponent)
           return ['Multiply', sign * whole, ['Power', 10, exponent]];
         return numberExpression(sign * whole);
       }
 
-      const fraction = parseInt(fractionalPart, 10);
-
-      // Determine the number of decimal places in fractional part
+      // Has fractional part - need to compute rational
       const n = fractionalPart.length;
+
+      // Check if the numerator calculation might overflow
+      // Numerator = whole * 10^n + fraction, which has roughly wholePart.length + n digits
+      const numeratorDigits = wholePart.length + n;
+      if (numeratorDigits > 15) {
+        // Use BigInt arithmetic to preserve precision
+        const wholeBig = BigInt(wholePart);
+        const fractionBig = BigInt(fractionalPart);
+        const denominatorBig = BigInt(10) ** BigInt(n);
+        const numeratorBig = wholeBig * denominatorBig + fractionBig;
+        const signedNumerator = sign < 0 ? -numeratorBig : numeratorBig;
+
+        if (exponent) {
+          return [
+            'Multiply',
+            [
+              'Rational',
+              { num: signedNumerator.toString() },
+              Number(denominatorBig),
+            ],
+            ['Power', 10, exponent],
+          ];
+        }
+        return [
+          'Rational',
+          { num: signedNumerator.toString() },
+          Number(denominatorBig),
+        ];
+      }
+
+      const whole = parseInt(wholePart, 10);
+      const fraction = parseInt(fractionalPart, 10);
 
       // Calculate numerator and denominator
       const numerator = whole * 10 ** n + fraction;
@@ -1387,41 +1599,93 @@ export class _Parser implements Parser {
    * and finally a closing matching operator.
    */
   parseEnclosure(): Expression | null {
-    const defs = this.getDefs('matchfix') as Iterable<IndexedMatchfixEntry>;
-
     const start = this.index;
+    const currentToken = this.peek;
+
+    // Use the matchfix index for fast lookup of relevant definitions
+    // If there's a delimiter prefix like \left, \mathopen, peek ahead to get the actual delimiter
+    const hasPrefix = OPEN_DELIMITER_PREFIX[currentToken];
+    let lookupToken = hasPrefix ? this._tokens[this.index + 1] : currentToken;
+    // Handle braced form: \mathopen{(} - skip past the brace to get the actual delimiter
+    if (hasPrefix && lookupToken === '<{>')
+      lookupToken = this._tokens[this.index + 2];
+
+    // Get only the matchfix defs that could match this opening token
+    // Note: some tokens (like |) may match multiple defs (|| and |)
+    let defs = this._dictionary.matchfixByOpen.get(lookupToken) ?? [];
+
+    // If no defs found and lookupToken is undefined, fall back to all matchfix defs
+    // (This handles edge cases with complex delimiters)
+    if (defs.length === 0 && !lookupToken) {
+      defs = [...this.getDefs('matchfix')] as IndexedMatchfixEntry[];
+    }
 
     //
-    // Try each def
+    // Try each potentially matching def
     //
     for (const def of defs) {
       this.index = start;
 
       // 1. Match the opening delimiter
-      if (!this.matchDelimiter(def.openTrigger, def.closeTrigger)) continue;
+      const matched = this.matchDelimiter(def.openTrigger, def.closeTrigger);
+      if (!matched) continue;
 
       // 2. Collect the expression in between the delimiters
       const bodyStart = this.index;
       this.skipSpace();
       let body = this.parseExpression();
       this.skipSpace();
-      if (!this.matchBoundary()) {
-        // We couldn't parse the body up to the closing delimiter.
-        // This could be a case where the boundary of the enclosure is
-        // ambiguous, i.e. `|(a+|b|+c)|`. Attempt to parse without the boundary
-        const boundary = this._boundaries[this._boundaries.length - 1].tokens;
-        this.removeBoundary();
+      const boundary = this._boundaries[this._boundaries.length - 1]?.tokens;
+      const matchedBoundary = this.matchBoundary();
+      const sameTrigger =
+        (typeof def.openTrigger === 'string' &&
+          typeof def.closeTrigger === 'string' &&
+          def.openTrigger === def.closeTrigger) ||
+        (Array.isArray(def.openTrigger) &&
+          Array.isArray(def.closeTrigger) &&
+          def.openTrigger.length === def.closeTrigger.length &&
+          def.openTrigger.every((tok, i) => tok === def.closeTrigger[i]));
+      if (matchedBoundary && isEmptySequence(body) && sameTrigger && boundary) {
+        // If the open/close delimiter are identical and the body is empty,
+        // we may have consumed an inner delimiter (e.g. "||3-5|-4|").
+        // Retry parsing without the boundary and look for the closing delimiter.
         this.index = bodyStart;
         this.skipSpace();
         body = this.parseExpression();
         this.skipSpace();
-        // If still could not match, try another
         if (!this.matchAll(boundary)) {
           this.index = start;
           if (!this.atEnd) continue;
-          // If we're at the end, we may need to backtrack and try again
-          // That's the case for `|1+|2|+3|`
           return null;
+        }
+      } else if (!matchedBoundary) {
+        // We couldn't parse the body up to the closing delimiter.
+        const boundary = this._boundaries[this._boundaries.length - 1]?.tokens;
+        if (!boundary) {
+          this.index = start;
+          continue;
+        }
+
+        if (
+          !this.canSkipMatchfixReparsing(lookupToken, boundary, sameTrigger)
+        ) {
+          // Re-parse without the boundary to handle ambiguous cases
+          this.removeBoundary();
+          this.index = bodyStart;
+          this.skipSpace();
+          body = this.parseExpression();
+          this.skipSpace();
+          if (!this.matchAll(boundary)) {
+            this.index = start;
+            if (!this.atEnd) continue;
+            return null;
+          }
+        } else {
+          // Performance optimization: skip re-parsing for (] when input is ()
+          // Must remove the boundary that matchDelimiter added before continuing
+          this.removeBoundary();
+          this.index = start;
+          continue;
         }
       }
       const result = def.parse(this, body ?? 'Nothing');
@@ -1492,12 +1756,19 @@ export class _Parser implements Parser {
     //
     // No known operator definition matched.
     //
+    let isPredicate = false;
     if (fn === null) {
       this.index = start;
       fn = parseSymbol(this);
       if (!this.isFunctionOperator(fn)) {
-        this.index = start;
-        return null;
+        // Check if this looks like a predicate: single uppercase letter
+        // followed by parentheses (e.g., P(x), Q(a,b))
+        // This enables automatic inference of predicates in FOL contexts
+        if (!this.looksLikePredicate(fn)) {
+          this.index = start;
+          return null;
+        }
+        isPredicate = true;
       }
     }
 
@@ -1515,6 +1786,17 @@ export class _Parser implements Parser {
     const args = this.parseArguments('enclosure', until);
 
     if (args === null) return fn;
+
+    // Predicates are wrapped in ["Predicate", name, ...args] to distinguish
+    // them from function applications. This is done:
+    // 1. Inside quantifier scopes (ForAll, Exists, etc.)
+    // 2. For "D" and "N" specifically, since D(f, x) and N(x) are not standard
+    //    math notation (D is derivative in MathJSON, N is numeric evaluation)
+    //    and could conflict with these library functions
+    if (isPredicate && typeof fn === 'string') {
+      if (this.inQuantifierScope || fn === 'D' || fn === 'N')
+        return ['Predicate', fn, ...args];
+    }
 
     return typeof fn === 'string' ? [fn, ...args] : ['Apply', fn!, ...args];
   }
@@ -1550,6 +1832,114 @@ export class _Parser implements Parser {
   }
 
   /**
+   * In non-strict mode, try to parse a bare function name followed by parentheses.
+   * This allows syntax like `sin(x)` instead of requiring `\sin(x)`.
+   *
+   * Returns the parsed function call or null if not a bare function.
+   */
+  private tryParseBareFunction(
+    until?: Readonly<Terminator>
+  ): Expression | null {
+    if (this.options.strict !== false) return null;
+
+    const start = this.index;
+
+    // Collect consecutive letter tokens to form a potential function name
+    let name = '';
+    while (!this.atEnd && /^[a-zA-Z]$/.test(this.peek)) {
+      name += this.peek;
+      this.index++;
+    }
+
+    if (!name) {
+      this.index = start;
+      return null;
+    }
+
+    this.skipSpace();
+
+    // Check if followed by opening parenthesis
+    if (this.peek !== '(') {
+      this.index = start;
+      return null;
+    }
+
+    // Map of common function names to their LaTeX equivalents
+    const BARE_FUNCTION_MAP: Record<string, string> = {
+      // Trigonometric
+      sin: 'Sin',
+      cos: 'Cos',
+      tan: 'Tan',
+      cot: 'Cot',
+      sec: 'Sec',
+      csc: 'Csc',
+      // Hyperbolic
+      sinh: 'Sinh',
+      cosh: 'Cosh',
+      tanh: 'Tanh',
+      coth: 'Coth',
+      sech: 'Sech',
+      csch: 'Csch',
+      // Inverse trigonometric
+      arcsin: 'Arcsin',
+      arccos: 'Arccos',
+      arctan: 'Arctan',
+      arccot: 'Arccot',
+      arcsec: 'Arcsec',
+      arccsc: 'Arccsc',
+      asin: 'Arcsin',
+      acos: 'Arccos',
+      atan: 'Arctan',
+      // Inverse hyperbolic
+      arcsinh: 'Arsinh',
+      arccosh: 'Arcosh',
+      arctanh: 'Artanh',
+      arccoth: 'Arcoth',
+      arcsech: 'Arsech',
+      arccsch: 'Arcsch',
+      asinh: 'Arsinh',
+      acosh: 'Arcosh',
+      atanh: 'Artanh',
+      // Logarithms and exponentials
+      log: 'Log',
+      ln: 'Ln',
+      exp: 'Exp',
+      lg: 'Lg',
+      lb: 'Lb',
+      // Other common functions
+      sqrt: 'Sqrt',
+      abs: 'Abs',
+      sgn: 'Sgn',
+      sign: 'Sgn',
+      floor: 'Floor',
+      ceil: 'Ceil',
+      round: 'Round',
+      max: 'Max',
+      min: 'Min',
+      gcd: 'Gcd',
+      lcm: 'Lcm',
+    };
+
+    const fnName = BARE_FUNCTION_MAP[name];
+    if (!fnName) {
+      // Not a recognized function name, backtrack
+      this.index = start;
+      return null;
+    }
+
+    // Parse the arguments in the enclosure (parentheses)
+    const args = this.parseArguments('enclosure', until);
+
+    if (args === null) {
+      // No valid arguments found, backtrack
+      this.index = start;
+      return null;
+    }
+
+    return [fnName, ...args];
+  }
+
+  /**
    * Parse a sequence superfix/subfix operator, e.g. `^{*}`
    *
    * Superfix and subfix need special handling:
@@ -1579,8 +1969,16 @@ export class _Parser implements Parser {
         if (this.match('_') || this.match('^'))
           subscripts.push(this.error('syntax-error', subIndex));
         else {
-          const sub =
-            this.parseGroup() ?? this.parseToken() ?? this.parseStringGroup();
+          let sub = this.parseGroup() ?? this.parseToken();
+          // In non-strict mode, also accept parenthesized expressions
+          // Note: After match('_'), peek has changed but TypeScript doesn't know
+          if (
+            sub === null &&
+            this.options.strict === false &&
+            (this.peek as string) === '('
+          )
+            sub = this.parseEnclosure();
+          sub ??= this.parseStringGroup();
           if (sub === null) return this.error('missing', index);
 
           subscripts.push(sub);
@@ -1590,7 +1988,15 @@ export class _Parser implements Parser {
         if (this.match('_') || this.match('^'))
           superscripts.push(this.error('syntax-error', subIndex));
         else {
-          const sup = this.parseGroup() ?? this.parseToken();
+          let sup = this.parseGroup() ?? this.parseToken();
+          // In non-strict mode, also accept parenthesized expressions
+          // Note: After match('^'), peek has changed but TypeScript doesn't know
+          if (
+            sup === null &&
+            this.options.strict === false &&
+            (this.peek as string) === '('
+          )
+            sup = this.parseEnclosure();
           if (sup === null) return this.error('missing', index);
           superscripts.push(sup);
         }
@@ -1896,6 +2302,9 @@ export class _Parser implements Parser {
     if (result === null && this.matchAll(this._imaginaryUnitTokens))
       result = 'ImaginaryUnit';
 
+    // In non-strict mode, try to parse bare function names like sin(x)
+    result ??= this.tryParseBareFunction(until);
+
     // ParseGenericExpression() has priority. Some generic expressions
     // may include symbols which have not been explicitly defined
     // with a 'symbol' kind
@@ -2053,7 +2462,13 @@ export class _Parser implements Parser {
     } else if (typeof expr === 'number') {
       expr = { latex, num: Number(expr).toString() };
     } else if (typeof expr === 'string') {
-      expr = { latex, sym: expr };
+      // Check if it's a string literal (starts with ')
+      if (expr.startsWith("'")) {
+        // String literal: remove the surrounding quotes
+        expr = { latex, str: expr.slice(1, -1) };
+      } else {
+        expr = { latex, sym: expr };
+      }
     } else if (typeof expr === 'object' && expr !== null) {
       (expr as ExpressionObject).latex = latex;
     }
@@ -2082,12 +2497,44 @@ export class _Parser implements Parser {
   private isFunctionOperator(id: MathJsonSymbol | null): boolean {
     if (id === null) return false;
 
+    // "D" is defined as the derivative function in the library, but "D(f, x)"
+    // is not standard mathematical notation for derivatives. The derivative
+    // should be written using Leibniz notation (\frac{d}{dx}f) or Lagrange
+    // notation (f'). Exclude "D" so it can be used as a regular variable
+    // (e.g., integration domain in \iint_D) or as a predicate in FOL.
+    //
+    // "N" is defined as the numeric evaluation function in the library, but
+    // "N(x)" is CAS-specific notation, not standard math notation. Exclude "N"
+    // so it can be used as a regular variable (e.g., "for all N in Naturals").
+    // Users can call .N() method for numeric evaluation, or use \operatorname{N}
+    // if they need the function in LaTeX.
+    if (id === 'D' || id === 'N') return false;
+
     // Is this a valid function symbol?
     if (this.getSymbolType(id).matches('function')) return true;
 
     // This doesn't look like the expression could be the name of a function:
     // it's a number, a string, a symbol or something else.
     return false;
+  }
+
+  /**
+   * Check if a symbol looks like a predicate in First-Order Logic.
+   * A predicate is typically a single uppercase letter (P, Q, R, etc.)
+   * followed by parentheses containing arguments.
+   *
+   * This enables automatic inference of predicates without explicit declaration,
+   * so `\forall x. P(x)` works without having to declare `P` as a function.
+   */
+  private looksLikePredicate(id: MathJsonSymbol | null): boolean {
+    if (id === null || typeof id !== 'string') return false;
+
+    // Must be a single uppercase letter
+    if (!/^[A-Z]$/.test(id)) return false;
+
+    // Must be followed by an opening parenthesis or \left(
+    this.skipSpace();
+    return this.peek === '(' || this.peek === '\\left';
   }
 
   /** Return all defs of the specified kind.

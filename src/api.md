@@ -420,7 +420,7 @@ readonly numericValue: number | NumericValue;
 Return the value of this expression, if a number literal.
 
 Note it is possible for `expr.numericValue` to be `null`, and for
-`expr.isNotZero` to be true. For example, when a symbol has been
+`expr.is(0)` to be false. For example, when a symbol has been
 defined with an assumption.
 
 Conversely, `expr.isNumber` may be true even if `expr.numericValue` is
@@ -877,7 +877,7 @@ If *false*, evaluating this expression may change the state of the
 Compute Engine or it may return a different value each time it is
 evaluated, even if the state of the Compute Engine is the same.
 
-As an example, the ["Add", 2, 3]` function expression is pure, but
+As an example, the `["Add", 2, 3]` function expression is pure, but
 the `["Random"]` function expression is not pure.
 
 For a function expression to be pure, the function itself (its operator)
@@ -1273,6 +1273,10 @@ is canonical.
 
 :::info[Note]
 Applicable to canonical and non-canonical expressions.
+
+If this is a function, an empty substitution is given, and the computed value of `canonical`
+does not differ from that of this expr.: then a call this method is analagous to requesting a
+*clone*.
 :::
 
 ####### sub
@@ -1344,11 +1348,25 @@ Transform the expression by applying one or more replacement rules:
 
 See also `expr.subs()` for a simple substitution of symbols.
 
-If `options.canonical` is not set, the result is canonical if `this`
-is canonical.
+Procedure for the determining the canonical-status of the input expression and replacements:
+
+- If `options.canonical` is set, the *entire expr.* is canonicalized to this degree: whether
+the replacement occurs at the top-level, or within/recursively.
+
+- If otherwise, the *direct replacement will be canonical* if either the 'replaced' expression
+is canonical, or the given replacement (- is a BoxedExpression and -) is canonical.
+Notably also, if this replacement takes place recursively (not at the top-level), then exprs.
+containing the replaced expr. will still however have their (previous) canonical-status
+*preserved*... unless this expr. was previously non-canonical, and *replacements have resulted
+in canonical operands*. In this case, an expr. meeting this criteria will be updated to
+canonical status. (Canonicalization is opportunistic here, in other words).
 
 :::info[Note]
 Applicable to canonical and non-canonical expressions.
+
+To match a specific symbol (not a wildcard pattern), the `match` must be
+a `BoxedExpression` (e.g., `{ match: ce.box('x'), replace: ... }`).
+For simple symbol substitution, consider using `subs()` instead.
 :::
 
 ####### rules
@@ -1557,6 +1575,39 @@ To manipulate symbolically non-canonical expressions, use `expr.replace()`.
 
 <MemberCard>
 
+##### BoxedExpression.trigSimplify()
+
+```ts
+trigSimplify(): BoxedExpression
+```
+
+Apply the Fu algorithm to simplify trigonometric expressions.
+
+The Fu algorithm is a systematic approach to trigonometric simplification
+that uses transformation rules (TR1-TR22), combination transforms (CTR),
+and rule lists (RL) to reduce the number of trigonometric functions.
+
+This is equivalent to calling `simplify({ strategy: 'fu' })` but is
+more convenient for trig-heavy expressions.
+
+Reference: Fu, Hongguang, Xiuqin Zhong, and Zhenbing Zeng.
+"Automated and readable simplification of trigonometric expressions."
+Mathematical and Computer Modelling 44.11 (2006): 1169-1177.
+
+###### Example
+
+```typescript
+ce.parse('\\sin(x)\\cos(x)').trigSimplify()
+// => sin(2x)/2
+
+ce.parse('\\sin^2(x) + \\cos^2(x)').trigSimplify()
+// => 1
+```
+
+</MemberCard>
+
+<MemberCard>
+
 ##### BoxedExpression.expand()
 
 ```ts
@@ -1681,11 +1732,34 @@ falls back to the interpreting the expression, unless the
 `options.fallback` is set to `false`. If it is set to `false`, the
 function will throw an error if it cannot be compiled.
 
+**Custom operators**: You can override operators to use function calls
+instead of native operators, useful for vector/matrix operations:
+
+```javascript
+const expr = ce.parse("v + w");
+const f = expr.compile({
+  operators: {
+    Add: ['add', 11],      // Convert + to add()
+    Multiply: ['mul', 12]   // Convert * to mul()
+  }
+});
+// Result: add(v, w) instead of v + w
+```
+
 ####### options?
 
 ####### to?
 
-`"javascript"` \| `"wgsl"` \| `"python"` \| `"webassembly"`
+`string`
+
+####### target?
+
+`any`
+
+####### operators?
+
+  \| `Partial`\<`Record`\<`string`, \[`string`, `number`\]\>\>
+  \| (`op`) => \[`string`, `number`\]
 
 ####### functions?
 
@@ -1714,15 +1788,33 @@ function will throw an error if it cannot be compiled.
 ##### BoxedExpression.solve()
 
 ```ts
-solve(vars?): readonly BoxedExpression[]
+solve(vars?): 
+  | readonly BoxedExpression[]
+  | Record<string, BoxedExpression>
+  | Record<string, BoxedExpression>[]
 ```
 
 If this is an equation, solve the equation for the variables in vars.
 Otherwise, solve the equation `this = 0` for the variables in vars.
 
+For univariate equations, returns an array of solutions (roots).
+For systems of linear equations (List of Equal expressions), returns
+an object mapping variable names to their values.
+For non-linear polynomial systems (like xy=6, x+y=5), returns an array
+of solution objects (multiple solutions possible).
+
 ```javascript
+// Univariate equation
 const expr = ce.parse("x^2 + 2*x + 1 = 0");
-console.log(expr.solve("x"));
+console.log(expr.solve("x")); // Returns array of roots
+
+// System of linear equations
+const system = ce.parse("\\begin{cases}x+y=70\\\\2x-4y=80\\end{cases}");
+console.log(system.solve(["x", "y"])); // Returns { x: 60, y: 10 }
+
+// Non-linear polynomial system (product + sum)
+const nonlinear = ce.parse("\\begin{cases}xy=6\\\\x+y=5\\end{cases}");
+console.log(nonlinear.solve(["x", "y"])); // Returns [{ x: 2, y: 3 }, { x: 3, y: 2 }]
 ```
 
 ####### vars?
@@ -2521,6 +2613,7 @@ type ReplaceOptions = {
   recursive: boolean;
   once: boolean;
   useVariations: boolean;
+  matchPermutations: boolean;
   iterationLimit: number;
   canonical: CanonicalOptions;
 };
@@ -2539,6 +2632,7 @@ type SimplifyOptions = {
      | ReadonlyArray<BoxedRule | Rule>
      | BoxedRuleSet;
   costFunction: (expr) => number;
+  strategy: "default" | "fu";
 };
 ```
 
@@ -2642,27 +2736,43 @@ type PatternMatchOptions = {
   substitution: BoxedSubstitution;
   recursive: boolean;
   useVariations: boolean;
+  matchPermutations: boolean;
 };
 ```
 
 Control how a pattern is matched to an expression.
 
-- `substitution`: if present, assumes these values for the named wildcards,
-   and ensure that subsequent occurrence of the same wildcard have the same
-   value.
+### Wildcards
+
+Patterns can include wildcards to match parts of expressions:
+
+- **Universal (`_` or `_name`)**: Matches exactly one element
+- **Sequence (`__` or `__name`)**: Matches one or more elements
+- **Optional Sequence (`___` or `___name`)**: Matches zero or more elements
+
+Named wildcards capture values in the returned substitution:
+- `['Add', '_a', 1].match(['Add', 'x', 1])` → `{_a: 'x'}`
+- `['Add', '__a'].match(['Add', 1, 2, 3])` → `{__a: [1, 2, 3]}`
+
+### Options
+
+- `substitution`: if present, assumes these values for a subset of
+   named wildcards, and ensure that subsequent occurrence of the same
+   wildcard have the same value.
 - `recursive`: if true, match recursively, otherwise match only the top
    level.
 - `useVariations`: if false, only match expressions that are structurally identical.
    If true, match expressions that are structurally identical or equivalent.
-
-   For example, when true, `["Add", '_a', 2]` matches `2`, with a value of
-   `_a` of `0`. If false, the expression does not match. **Default**: `false`
+   For example, when true, `["Add", '_a', 2]` matches `2`, with `_a = 0`.
+   **Default**: `false`
+- `matchPermutations`: if true (default), for commutative operators, try all
+   permutations of pattern operands. If false, match exact order only.
 
 </MemberCard>
 
 <MemberCard>
 
-### Substitution\<T\>
+### Substitution
 
 ```ts
 type Substitution<T> = {};
@@ -2784,18 +2894,22 @@ type Rule =
 };
 ```
 
-A rule describes how to modify an expressions that matches a pattern `match`
+A rule describes how to modify an expression that matches a pattern `match`
 into a new expression `replace`.
 
 - `x-1` \( \to \) `1-x`
-- `(x+1)(x-1)` \( \to \) `x^2-1
+- `(x+1)(x-1)` \( \to \) `x^2-1`
 
-The patterns can be expressed as LaTeX strings or a MathJSON expressions.
+The patterns can be expressed as LaTeX strings or `SemiBoxedExpression`'s.
+Alternatively, match/replace logic may be specified by a `RuleFunction`, allowing both custom
+logic/conditions for the match, and either a *BoxedExpression* (or `RuleStep` if being
+descriptive) for the replacement.
 
 As a shortcut, a rule can be defined as a LaTeX string: `x-1 -> 1-x`.
 The expression to the left of `->` is the `match` and the expression to the
 right is the `replace`. When using LaTeX strings, single character variables
-are assumed to be wildcards.
+are assumed to be wildcards. The rule LHS ('match') and RHS ('replace') may also be supplied
+separately: in this case following the same rules.
 
 When using MathJSON expressions, anonymous wildcards (`_`) will match any
 expression. Named wildcards (`_x`, `_a`, etc...) will match any expression
@@ -3108,7 +3222,7 @@ toExpression(ce, x): BoxedExpression
 
 </MemberCard>
 
-### ExpressionMapInterface\<U\>
+### ExpressionMapInterface
 
 <MemberCard>
 
@@ -3307,6 +3421,7 @@ type ValueDefinition = BaseDefinition & {
   neq: (a) => boolean | undefined;
   cmp: (a) => "=" | ">" | "<" | undefined;
   collection: CollectionHandlers;
+  subscriptEvaluate: (subscript, options) => BoxedExpression | undefined;
 };
 ```
 
@@ -3335,6 +3450,370 @@ value:
 `value` can be a JS function since for some constants, such as
 `Pi`, the actual value depends on the `precision` setting of the
 `ComputeEngine` and possible other environment settings
+
+#### ValueDefinition.subscriptEvaluate()?
+
+```ts
+optional subscriptEvaluate: (subscript, options) => BoxedExpression | undefined;
+```
+
+Custom evaluation handler for subscripted expressions of this symbol.
+Called when evaluating `Subscript(symbol, index)`.
+
+###### subscript
+
+[`BoxedExpression`](#boxedexpression)
+
+The subscript expression (already evaluated)
+
+###### options
+
+Contains the compute engine and evaluation options
+
+####### engine
+
+`ComputeEngine`
+
+####### numericApproximation?
+
+`boolean`
+
+</MemberCard>
+
+### SequenceDefinition
+
+Definition for a sequence declared with `ce.declareSequence()`.
+
+A sequence is defined by base cases and a recurrence relation.
+
+#### Example
+
+```typescript
+// Fibonacci sequence
+ce.declareSequence('F', {
+  base: { 0: 0, 1: 1 },
+  recurrence: 'F_{n-1} + F_{n-2}',
+});
+ce.parse('F_{10}').evaluate();  // → 55
+```
+
+<MemberCard>
+
+##### SequenceDefinition.variable?
+
+```ts
+optional variable: string;
+```
+
+Index variable name for single-index sequences, default 'n'.
+For multi-index sequences, use `variables` instead.
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceDefinition.variables?
+
+```ts
+optional variables: string[];
+```
+
+Index variable names for multi-index sequences.
+Example: `['n', 'k']` for Pascal's triangle `P\_{n,k}`
+
+If provided, this takes precedence over `variable`.
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceDefinition.base
+
+```ts
+base: Record<number | string, number | BoxedExpression>;
+```
+
+Base cases as index → value mapping.
+
+For single-index sequences, use numeric keys:
+```typescript
+base: { 0: 0, 1: 1 }  // F_0 = 0, F_1 = 1
+```
+
+For multi-index sequences, use comma-separated string keys:
+```typescript
+base: {
+  '0,0': 1,    // Exact: P_{0,0} = 1
+  'n,0': 1,    // Pattern: P_{n,0} = 1 for all n
+  'n,n': 1,    // Pattern: P_{n,n} = 1 (diagonal)
+}
+```
+
+Pattern keys use variable names to match any value. When the same
+variable appears multiple times (e.g., 'n,n'), the indices must be equal.
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceDefinition.recurrence
+
+```ts
+recurrence: string | BoxedExpression;
+```
+
+Recurrence relation as LaTeX string or BoxedExpression
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceDefinition.memoize?
+
+```ts
+optional memoize: boolean;
+```
+
+Whether to memoize computed values (default: true)
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceDefinition.domain?
+
+```ts
+optional domain: 
+  | {
+  min: number;
+  max: number;
+ }
+  | Record<string, {
+  min: number;
+  max: number;
+}>;
+```
+
+Valid index domain constraints.
+
+For single-index sequences:
+```typescript
+domain: { min: 0, max: 100 }
+```
+
+For multi-index sequences, use per-variable constraints:
+```typescript
+domain: { n: { min: 0 }, k: { min: 0 } }
+```
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceDefinition.constraints?
+
+```ts
+optional constraints: string | BoxedExpression;
+```
+
+Constraint expression for multi-index sequences.
+The expression should evaluate to a boolean/numeric value.
+If it evaluates to false or 0, the subscript is considered out of domain.
+
+Example: `'k <= n'` for Pascal's triangle (only valid when k ≤ n)
+
+</MemberCard>
+
+### SequenceStatus
+
+Status of a sequence definition.
+
+<MemberCard>
+
+##### SequenceStatus.status
+
+```ts
+status: "complete" | "pending" | "not-a-sequence";
+```
+
+Status of the sequence:
+- 'complete': Both base case(s) and recurrence defined
+- 'pending': Waiting for base case(s) or recurrence
+- 'not-a-sequence': Symbol is not a sequence
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceStatus.hasBase
+
+```ts
+hasBase: boolean;
+```
+
+Whether at least one base case is defined
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceStatus.hasRecurrence
+
+```ts
+hasRecurrence: boolean;
+```
+
+Whether a recurrence relation is defined
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceStatus.baseIndices
+
+```ts
+baseIndices: (string | number)[];
+```
+
+Keys of defined base cases.
+For single-index: numeric indices (e.g., [0, 1])
+For multi-index: string keys including patterns (e.g., ['0,0', 'n,0', 'n,n'])
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceStatus.variable?
+
+```ts
+optional variable: string;
+```
+
+Index variable name if recurrence is defined (single-index)
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceStatus.variables?
+
+```ts
+optional variables: string[];
+```
+
+Index variable names if recurrence is defined (multi-index)
+
+</MemberCard>
+
+### SequenceInfo
+
+Information about a defined sequence for introspection.
+
+<MemberCard>
+
+##### SequenceInfo.name
+
+```ts
+name: string;
+```
+
+The sequence name
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.variable?
+
+```ts
+optional variable: string;
+```
+
+Index variable name for single-index sequences (e.g., `"n"`)
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.variables?
+
+```ts
+optional variables: string[];
+```
+
+Index variable names for multi-index sequences (e.g., `["n", "k"]`)
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.baseIndices
+
+```ts
+baseIndices: (string | number)[];
+```
+
+Base case keys.
+For single-index: numeric indices
+For multi-index: string keys including patterns
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.memoize
+
+```ts
+memoize: boolean;
+```
+
+Whether memoization is enabled
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.domain
+
+```ts
+domain: 
+  | {
+  min: number;
+  max: number;
+ }
+  | Record<string, {
+  min: number;
+  max: number;
+}>;
+```
+
+Domain constraints.
+For single-index: `{ min?, max? }`
+For multi-index: per-variable constraints
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.cacheSize
+
+```ts
+cacheSize: number;
+```
+
+Number of cached values
+
+</MemberCard>
+
+<MemberCard>
+
+##### SequenceInfo.isMultiIndex
+
+```ts
+isMultiIndex: boolean;
+```
+
+Whether this is a multi-index sequence
 
 </MemberCard>
 
@@ -4066,6 +4545,19 @@ type: BoxedType;
 
 <MemberCard>
 
+##### BoxedValueDefinition.subscriptEvaluate()?
+
+```ts
+optional subscriptEvaluate: (subscript, options) => BoxedExpression;
+```
+
+Custom evaluation handler for subscripted expressions of this symbol.
+Called when evaluating `Subscript(symbol, index)`.
+
+</MemberCard>
+
+<MemberCard>
+
 ### OperatorDefinitionFlags
 
 ```ts
@@ -4399,30 +4891,51 @@ operators are applied.
 For example, in `1 + 2 * 3`, the `*` operator has a **higher** precedence
 than the `+` operator, so it is applied first.
 
-The precedence range from 0 to 1000. The larger the number, the higher the
+The precedence ranges from 0 to 1000. The larger the number, the higher the
 precedence, the more "binding" the operator is.
 
-Here are some rough ranges for the precedence:
+### Operator Precedence Table
 
-- 800: prefix and postfix operators: `\lnot` etc...
-   - `POSTFIX_PRECEDENCE` = 810: `!`, `'`
-- 700: some arithmetic operators
-   - `EXPONENTIATION_PRECEDENCE` = 700: `^`
-- 600: some binary operators
-   - `DIVISION_PRECEDENCE` = 600: `\div`
-- 500: not used
-- 400: not used
-- 300: some logic and arithmetic operators:
-       `\land`, `\lor`, `\times`, etc...
-  - `MULTIPLICATION_PRECEDENCE` = 390: `\times`
-- 200: arithmetic operators, inequalities:
-  - `ADDITION_PRECEDENCE` = 275: `+` `-`
-  - `ARROW_PRECEDENCE` = 270: `\to` `\rightarrow`
-  - `ASSIGNMENT_PRECEDENCE` = 260: `:=`
-  - `COMPARISON_PRECEDENCE` = 245: `\lt` `\gt`
-  - 241: `\leq`
-- 100: not used
-- 0: `,`, `;`, etc...
+| Precedence | Operators | Description |
+|------------|-----------|-------------|
+| **880** | `\lnot` `\neg` `++` `--` `+` `-` (prefix) | Prefix/postfix unary |
+| **810** | `!` `'` `!!` `'''` | Factorial, prime (postfix) |
+| **800** | `_` (subscript) | Subscript |
+| **780** | `\degree` `\prime` | Degree, prime symbols |
+| **740** | `\%` | Percent |
+| **720** | `/` (inline division) | Inline division |
+| **700** | `^` `\overset` `\underset` | Exponentiation, over/underscript |
+| **650** | (invisible multiply) `\cdot` | Implicit multiplication |
+| **600** | `\div` `\frac` | Division |
+| **390** | `\times` `*` `/` | Multiplication |
+| **350** | `\cup` `\cap` | Set union/intersection |
+| **275** | `+` `-` (infix) | Addition, subtraction |
+| **270** | `\to` `\rightarrow` `\mapsto` | Arrows |
+| **265** | `\setminus` `\smallsetminus` `:` (range) | Set difference, range |
+| **260** | `:=` | Assignment |
+| **255** | `\ne` | Not equal |
+| **250** | `\not\approxeq` | Not approximately equal |
+| **247** | `\approx` | Approximately |
+| **245-246** | `=` `<` `>` `\lt` `\gt` `\nless` `\ngtr` | Equality, comparison |
+| **241-244** | `\le` `\leq` `\ge` `\geq` `>=` | Less/greater or equal |
+| **240** | `\in` `\notin` `\subset` `\supset` ... | Set membership/relations |
+| **235** | `\land` `\wedge` `\&` | Logical AND |
+| **232** | `\veebar` `\barwedge` (Xor, Nand, Nor) | Logical XOR, NAND, NOR |
+| **230** | `\lor` `\vee` `\parallel` | Logical OR |
+| **220** | `\implies` `\Rightarrow` `\vdash` `\models` | Implication, entailment |
+| **219** | `\iff` `\Leftrightarrow` `\equiv` | Equivalence |
+| **200** | `\forall` `\exists` `\exists!` | Quantifiers |
+| **160** | `\mid` `\vert` (set builder) | Set builder notation |
+| **19-20** | `,` `;` `\ldots` | Sequence separators |
+
+### Key Relationships
+
+- **Comparisons bind tighter than logic**: `x = 1 \lor y = 2` parses as
+  `(x = 1) \lor (y = 2)`, not `x = (1 \lor y) = 2`
+- **AND binds tighter than OR**: `a \land b \lor c` parses as
+  `(a \land b) \lor c`
+- **Logic operators bind tighter than implication**: `a \lor b \implies c`
+  parses as `(a \lor b) \implies c`
 
 Some constants are defined below for common precedence values.
 
@@ -4867,7 +5380,7 @@ type LatexDictionaryEntry = OneOf<[
 A dictionary entry is a record that maps a LaTeX token or string of tokens
 ( a trigger) to a MathJSON expression or to a parsing handler.
 
-Set the ComputeEngine.latexDictionary property to an array of
+Set the `ComputeEngine.latexDictionary` property to an array of
 dictionary entries to define custom LaTeX parsing and serialization.
 
 </MemberCard>
@@ -4878,15 +5391,33 @@ dictionary entries to define custom LaTeX parsing and serialization.
 
 ```ts
 type ParseLatexOptions = NumberFormat & {
+  strict: boolean;
   skipSpace: boolean;
   parseNumbers: "auto" | "rational" | "decimal" | "never";
   getSymbolType: (symbol) => BoxedType;
+  hasSubscriptEvaluate: (symbol) => boolean;
   parseUnexpectedToken: (lhs, parser) => Expression | null;
   preserveLatex: boolean;
+  quantifierScope: "tight" | "loose";
+  timeDerivativeVariable: string;
 };
 ```
 
 The LaTeX parsing options can be used with the `ce.parse()` method.
+
+#### ParseLatexOptions.strict
+
+```ts
+strict: boolean;
+```
+
+Controls the strictness of LaTeX parsing:
+
+- `true`: Strict LaTeX syntax required (e.g., `\sin{x}`, `x^{n+1}`)
+- `false`: Accept relaxed Math-ASCII/Typst-like syntax in addition to
+  LaTeX (e.g., `sin(x)`, `x^(n+1)`)
+
+**Default**: `true`
 
 #### ParseLatexOptions.skipSpace
 
@@ -4930,6 +5461,17 @@ that has not yet been declared.
 
 The `symbol` argument is a [valid symbol](#symbols).
 
+#### ParseLatexOptions.hasSubscriptEvaluate()?
+
+```ts
+optional hasSubscriptEvaluate: (symbol) => boolean;
+```
+
+This handler is invoked when the parser needs to determine if a symbol
+has a custom subscript evaluation handler. If true, subscripts on this
+symbol will be kept as `Subscript` expressions rather than being absorbed
+into a compound symbol name.
+
 #### ParseLatexOptions.parseUnexpectedToken()
 
 ```ts
@@ -4964,6 +5506,51 @@ commands replaced, for example `\egroup` and `\bgroup`.
 
 **Default:** `false`
 
+#### ParseLatexOptions.quantifierScope
+
+```ts
+quantifierScope: "tight" | "loose";
+```
+
+Controls how quantifier scope is determined when parsing expressions
+like `\forall x. P(x) \rightarrow Q(x)`.
+
+- `"tight"`: The quantifier binds only to the immediately following
+  well-formed formula, stopping at logical connectives (`\rightarrow`,
+  `\implies`, `\land`, `\lor`, etc.). This follows standard First-Order
+  Logic conventions. Use explicit parentheses for wider scope:
+  `\forall x. (P(x) \rightarrow Q(x))`.
+
+- `"loose"`: The quantifier scope extends to the end of the expression
+  or until a lower-precedence operator is encountered.
+
+**Default:** `"tight"`
+
+##### Example
+
+```ts
+// With "tight" (default):
+// \forall x. P(x) \rightarrow Q(x)
+// parses as: (∀x. P(x)) → Q(x)
+
+// With "loose":
+// \forall x. P(x) \rightarrow Q(x)
+// parses as: ∀x. (P(x) → Q(x))
+```
+
+#### ParseLatexOptions.timeDerivativeVariable
+
+```ts
+timeDerivativeVariable: string;
+```
+
+The variable used for time derivatives in Newton notation
+(`\dot{x}`, `\ddot{x}`, etc.).
+
+When parsing `\dot{x}`, it will be interpreted as `["D", "x", timeDerivativeVariable]`.
+
+**Default:** `"t"`
+
 </MemberCard>
 
 ### Parser
@@ -4976,8 +5563,20 @@ LaTeX dictionary entries.
 ##### Parser.options
 
 ```ts
-readonly options: Required<ParseLatexOptions>;
+readonly options: Readonly<ParseLatexOptions>;
 ```
+
+</MemberCard>
+
+<MemberCard>
+
+##### Parser.inQuantifierScope
+
+```ts
+readonly inQuantifierScope: boolean;
+```
+
+True if currently parsing inside a quantifier body (ForAll, Exists, etc.)
 
 </MemberCard>
 
@@ -5040,6 +5639,22 @@ getSymbolType(id): BoxedType
 
 <MemberCard>
 
+##### Parser.hasSubscriptEvaluate()
+
+```ts
+hasSubscriptEvaluate(id): boolean
+```
+
+Check if a symbol has a custom subscript evaluation handler.
+
+####### id
+
+`string`
+
+</MemberCard>
+
+<MemberCard>
+
 ##### Parser.pushSymbolTable()
 
 ```ts
@@ -5073,6 +5688,30 @@ addSymbol(id, type): void
 ####### type
 
 `string` | [`BoxedType`](#boxedtype)
+
+</MemberCard>
+
+<MemberCard>
+
+##### Parser.enterQuantifierScope()
+
+```ts
+enterQuantifierScope(): void
+```
+
+Enter a quantifier scope for parsing the body of ForAll, Exists, etc.
+
+</MemberCard>
+
+<MemberCard>
+
+##### Parser.exitQuantifierScope()
+
+```ts
+exitQuantifierScope(): void
+```
+
+Exit the current quantifier scope
 
 </MemberCard>
 
@@ -5779,7 +6418,7 @@ powerStyle: (expr, level) => "quotient" | "solidus" | "root";
 ##### Serializer.numericSetStyle()
 
 ```ts
-numericSetStyle: (expr, level) => "interval" | "compact" | "regular" | "set-builder";
+numericSetStyle: (expr, level) => "compact" | "regular" | "interval" | "set-builder";
 ```
 
 </MemberCard>
@@ -6556,6 +7195,112 @@ bignum(value): Decimal
 
 </MemberCard>
 
+## OEIS
+
+### OEISSequenceInfo
+
+Result from an OEIS lookup operation.
+
+<MemberCard>
+
+##### OEISSequenceInfo.id
+
+```ts
+id: string;
+```
+
+OEIS sequence ID (e.g., 'A000045')
+
+</MemberCard>
+
+<MemberCard>
+
+##### OEISSequenceInfo.name
+
+```ts
+name: string;
+```
+
+Sequence name/description
+
+</MemberCard>
+
+<MemberCard>
+
+##### OEISSequenceInfo.terms
+
+```ts
+terms: number[];
+```
+
+First several terms of the sequence
+
+</MemberCard>
+
+<MemberCard>
+
+##### OEISSequenceInfo.formula?
+
+```ts
+optional formula: string;
+```
+
+Formula or recurrence (if available)
+
+</MemberCard>
+
+<MemberCard>
+
+##### OEISSequenceInfo.comments?
+
+```ts
+optional comments: string[];
+```
+
+Comments about the sequence
+
+</MemberCard>
+
+<MemberCard>
+
+##### OEISSequenceInfo.url
+
+```ts
+url: string;
+```
+
+URL to the OEIS page
+
+</MemberCard>
+
+### OEISOptions
+
+Options for OEIS operations.
+
+<MemberCard>
+
+##### OEISOptions.timeout?
+
+```ts
+optional timeout: number;
+```
+
+Request timeout in milliseconds (default: 10000)
+
+</MemberCard>
+
+<MemberCard>
+
+##### OEISOptions.maxResults?
+
+```ts
+optional maxResults: number;
+```
+
+Maximum number of results to return for lookups (default: 5)
+
+</MemberCard>
+
 ## Other
 
 ### DictionaryInterface
@@ -6703,45 +7448,6 @@ The maximum number of significant digits in serialized numbers.
 
 Default: `"auto"`
 
-#### NumberSerializationFormat.notation
-
-```ts
-notation: "auto" | "engineering" | "scientific" | "adaptiveScientific";
-```
-
-Controls how numbers with exponents are formatted:
-
-- `"auto"`: Display as decimal when possible, use exponent notation otherwise
-- `"scientific"`: Always use normalized scientific notation (mantissa between 1 and 10)
-- `"engineering"`: Use engineering notation (exponent is a multiple of 3)
-- `"adaptiveScientific"`: Like `"auto"` within the avoid range, but use normalized scientific notation outside
-
-Default: `"auto"`
-
-#### NumberSerializationFormat.avoidExponentsInRange
-
-```ts
-avoidExponentsInRange: undefined | null | [number, number];
-```
-
-Specifies a range of exponents where decimal notation is preferred over exponent notation.
-For example, `[-7, 20]` means exponents from -7 to 20 will be displayed as decimals when possible.
-
-Default: `[-7, 20]`
-
-#### Notation Behavior Summary
-
-The table below shows how each notation mode behaves when the exponent is inside or outside the `avoidExponentsInRange`:
-
-| Notation | Exponent in Avoid Range | Exponent Outside Avoid Range |
-|----------|-------------------------|------------------------------|
-| `"auto"` | Decimal (e.g., `0.000000142857`) | Exponent, not normalized (e.g., `14285714×10^{-24}`) |
-| `"scientific"` | Scientific notation (e.g., `1.428×10^{-7}`) | Scientific notation (e.g., `1.428×10^{-8}`) |
-| `"engineering"` | Decimal or engineering | Engineering notation (exponent multiple of 3) |
-| `"adaptiveScientific"` | Decimal (e.g., `0.000000142857`) | Scientific notation (e.g., `1.428×10^{-8}`) |
-
-Note: `"scientific"` notation ignores `avoidExponentsInRange` and always produces normalized scientific notation.
-
 </MemberCard>
 
 ## Tensors
@@ -6779,7 +7485,7 @@ The type of the cells in a tensor.
 
 </MemberCard>
 
-### TensorData\<DT\>
+### TensorData
 
 A record representing the type, shape and data of a tensor.
 
@@ -6827,7 +7533,7 @@ data: DataTypeMap[DT][];
 
 </MemberCard>
 
-### TensorField\<T\>
+### TensorField
 
 <MemberCard>
 
@@ -7309,7 +8015,7 @@ conjugate(x): T
 
 </MemberCard>
 
-### Tensor\<DT\>
+### Tensor
 
 #### Extends
 
@@ -7512,7 +8218,7 @@ diagonal(axis1?, axis2?): DataTypeMap[DT][]
 ##### Tensor.trace()
 
 ```ts
-trace(axis1?, axis2?): DataTypeMap[DT]
+trace(axis1?, axis2?): Tensor<DT> | DataTypeMap[DT]
 ```
 
 ####### axis1?

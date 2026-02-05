@@ -3,6 +3,8 @@
 
 import { BoxedType } from '../../common/type/boxed-type';
 import { parseType } from '../../common/type/parse';
+import { reduceType } from '../../common/type/reduce';
+import type { Type } from '../../common/type/types';
 import { flatten } from '../boxed-expression/flatten';
 import { validateArguments } from '../boxed-expression/validate';
 import {
@@ -20,6 +22,41 @@ import {
   cantorEnumeratePositiveRationals,
   cantorEnumerateRationals,
 } from '../numerics/numeric';
+
+function typeIntersection(a: Type, b: Type): Type {
+  return reduceType({ kind: 'intersection', types: [a, b] });
+}
+
+/**
+ * Transform a List or Tuple with exactly 2 elements to an Interval in set contexts.
+ *
+ * This enables contextual parsing where `[a, b]` and `(a, b)` are interpreted as
+ * intervals when used as operands of set operations like Element, Union, etc.
+ *
+ * - `["List", a, b]` → `["Interval", a, b]` (closed interval [a, b])
+ * - `["Tuple", a, b]` → `["Interval", ["Open", a], ["Open", b]]` (open interval (a, b))
+ *
+ * Returns the original expression unchanged if it's not a 2-element List/Tuple.
+ */
+function listToIntervalInSetContext(
+  ce: ComputeEngine,
+  expr: BoxedExpression
+): BoxedExpression {
+  // Transform List with 2 elements to closed Interval
+  if (expr.operator === 'List' && expr.nops === 2) {
+    return ce.function('Interval', [expr.op1.canonical, expr.op2.canonical]);
+  }
+
+  // Transform Tuple with 2 elements to open Interval
+  if (expr.operator === 'Tuple' && expr.nops === 2) {
+    return ce.function('Interval', [
+      ce.function('Open', [expr.op1.canonical]),
+      ce.function('Open', [expr.op2.canonical]),
+    ]);
+  }
+
+  return expr.canonical;
+}
 
 export const SETS_LIBRARY: SymbolDefinitions = {
   //
@@ -481,12 +518,99 @@ export const SETS_LIBRARY: SymbolDefinitions = {
   //
   Element: {
     complexity: 11200,
-    signature: '(value, collection) -> boolean',
-    description: 'Test whether a value is an element of a collection.',
-    evaluate: ([value, collection], { engine: ce }) => {
-      const result = collection.contains(value);
-      if (result === true) return ce.True;
-      if (result === false) return ce.False;
+    // EL-3: Extended signature to support optional condition for filtered iteration
+    // The condition is used by Sum/Product to filter values when iterating
+    signature: '(value, collection, boolean?) -> boolean',
+    description:
+      'Test whether a value is an element of a collection. ' +
+      'Optional third argument is a boolean expression (condition) for filtered iteration in Sum/Product.\n\n' +
+      'Element supports two modes of operation:\n' +
+      '1. Set membership: Element(3, [List, 1, 2, 3]) checks if 3 is in the list\n' +
+      '2. Type-style membership: Element(x, integer) checks if x has type integer\n\n' +
+      'Type-style membership works with:\n' +
+      '- Mathematical sets: Integers, RealNumbers, ComplexNumbers, etc.\n' +
+      '- Type names: integer, real, number, finite_real, positive_integer, etc.\n' +
+      '- Invalid type names remain unevaluated (e.g., Element(2, "Booleans"))',
+    canonical: (args, { engine: ce }) => {
+      // Let default signature validation handle missing required arguments
+      if (args.length === 0) {
+        return ce._fn('Element', [ce.error('missing'), ce.error('missing')]);
+      }
+      if (args.length === 1) {
+        return ce._fn('Element', [args[0].canonical, ce.error('missing')]);
+      }
+
+      const [value, collection, condition] = args;
+      // Transform List/Tuple with 2 elements to Interval in set context
+      const canonicalCollection = listToIntervalInSetContext(ce, collection);
+
+      // Validate collection type
+      if (
+        !canonicalCollection.type.matches('collection') &&
+        !canonicalCollection.symbol &&
+        !canonicalCollection.isValid
+      ) {
+        return ce._fn('Element', [
+          value.canonical,
+          ce.error([
+            'incompatible-type',
+            `'collection'`,
+            canonicalCollection.type.toString(),
+          ]),
+          ...(condition ? [condition.canonical] : []),
+        ]);
+      }
+
+      // Validate optional third argument
+      if (condition && condition.symbol !== 'Nothing') {
+        if (!condition.type.matches('boolean')) {
+          return ce._fn('Element', [
+            value.canonical,
+            canonicalCollection,
+            ce.error([
+              'incompatible-type',
+              `'boolean'`,
+              collection.type.toString(),
+            ]),
+          ]);
+        }
+        return ce._fn('Element', [
+          value.canonical,
+          canonicalCollection,
+          condition.canonical,
+        ]);
+      }
+      return ce._fn('Element', [value.canonical, canonicalCollection]);
+    },
+    evaluate: ([value, collection, _condition], { engine: ce }) => {
+      // Note: condition is only used during Sum/Product iteration,
+      // not for standalone Element evaluation
+
+      // Check if collection has a contains method before calling it
+      if (collection && typeof collection.contains === 'function') {
+        const result = collection.contains(value);
+        if (result === true) return ce.True;
+        if (result === false) return ce.False;
+      }
+
+      // Support type-style membership checks, e.g. Element(x, finite_real) or
+      // Element(x, Integers). Try to interpret the collection as a type.
+      const typeName = collection?.symbol;
+      if (typeName) {
+        try {
+          const type = ce.type(typeName);
+          if (!type.isUnknown) {
+            const valueType = value.type;
+            if (valueType.matches(type)) return ce.True;
+            if (typeIntersection(valueType.type, type.type) === 'nothing')
+              return ce.False;
+          }
+        } catch {
+          // If type parsing fails (e.g., "Booleans" is not a valid type),
+          // fall through and return undefined
+        }
+      }
+
       return undefined;
     },
   },
@@ -499,6 +623,19 @@ export const SETS_LIBRARY: SymbolDefinitions = {
       const result = collection.contains(value);
       if (result === true) return ce.False;
       if (result === false) return ce.True;
+
+      // Support type-style membership checks, e.g. NotElement(x, real).
+      const typeName = collection.symbol;
+      if (typeName) {
+        const type = ce.type(typeName);
+        if (!type.isUnknown) {
+          const valueType = value.type;
+          if (valueType.matches(type)) return ce.False;
+          if (typeIntersection(valueType.type, type.type) === 'nothing')
+            return ce.True;
+        }
+      }
+
       return undefined;
     },
   },
@@ -508,6 +645,14 @@ export const SETS_LIBRARY: SymbolDefinitions = {
     signature: '(lhs:collection, rhs: collection) -> boolean',
     description:
       'Test whether the first collection is a strict subset of the second.',
+    canonical: (args, { engine: ce }) => {
+      if (args.length !== 2) return ce._fn('Subset', args);
+      // Transform List/Tuple with 2 elements to Interval in set context
+      return ce._fn('Subset', [
+        listToIntervalInSetContext(ce, args[0]),
+        listToIntervalInSetContext(ce, args[1]),
+      ]);
+    },
     evaluate: ([lhs, rhs], { engine: ce }) => {
       const result = subset(lhs, rhs);
       if (result === true) return ce.True;
@@ -521,6 +666,14 @@ export const SETS_LIBRARY: SymbolDefinitions = {
     signature: '(lhs:collection, rhs: collection) -> boolean',
     description:
       'Test whether the first collection is a subset (possibly equal) of the second.',
+    canonical: (args, { engine: ce }) => {
+      if (args.length !== 2) return ce._fn('SubsetEqual', args);
+      // Transform List/Tuple with 2 elements to Interval in set context
+      return ce._fn('SubsetEqual', [
+        listToIntervalInSetContext(ce, args[0]),
+        listToIntervalInSetContext(ce, args[1]),
+      ]);
+    },
     evaluate: ([lhs, rhs], { engine: ce }) => {
       const result = subset(lhs, rhs, false);
       if (result === true) return ce.True;
@@ -547,6 +700,14 @@ export const SETS_LIBRARY: SymbolDefinitions = {
     signature: '(lhs:collection, rhs: collection) -> boolean',
     description:
       'Test whether the first collection is a strict superset of the second.',
+    canonical: (args, { engine: ce }) => {
+      if (args.length !== 2) return ce._fn('Superset', args);
+      // Transform List/Tuple with 2 elements to Interval in set context
+      return ce._fn('Superset', [
+        listToIntervalInSetContext(ce, args[0]),
+        listToIntervalInSetContext(ce, args[1]),
+      ]);
+    },
     evaluate: ([lhs, rhs], { engine: ce }) => {
       const result = subset(rhs, lhs); // reversed
       if (result === true) return ce.True;
@@ -560,6 +721,14 @@ export const SETS_LIBRARY: SymbolDefinitions = {
     signature: '(lhs:collection, rhs: collection) -> boolean',
     description:
       'Test whether the first collection is a superset (possibly equal) of the second.',
+    canonical: (args, { engine: ce }) => {
+      if (args.length !== 2) return ce._fn('SupersetEqual', args);
+      // Transform List/Tuple with 2 elements to Interval in set context
+      return ce._fn('SupersetEqual', [
+        listToIntervalInSetContext(ce, args[0]),
+        listToIntervalInSetContext(ce, args[1]),
+      ]);
+    },
     evaluate: ([lhs, rhs], { engine: ce }) => {
       const result = subset(rhs, lhs, true); // reversed
       if (result === true) return ce.True;
@@ -637,13 +806,17 @@ export const SETS_LIBRARY: SymbolDefinitions = {
     canonical: (args, { engine: ce }) => {
       if (args.length === 0) return ce.symbol('EmptySet');
       if (args.length === 1) return ce.symbol('EmptySet');
-      args =
+      // Transform List/Tuple with 2 elements to Interval in set context
+      const transformedArgs = args.map((arg) =>
+        listToIntervalInSetContext(ce, arg)
+      );
+      const validatedArgs =
         validateArguments(
           ce,
-          flatten(args, 'Intersection'),
+          flatten(transformedArgs, 'Intersection'),
           parseType('(set+) -> set')
-        ) ?? args;
-      return ce._fn('Intersection', args);
+        ) ?? transformedArgs;
+      return ce._fn('Intersection', validatedArgs);
     },
     evaluate: intersection,
     collection: {
@@ -663,16 +836,20 @@ export const SETS_LIBRARY: SymbolDefinitions = {
     description: 'Return the union of two or more collections as a set.',
     canonical: (args, { engine: ce }) => {
       if (args.length === 0) return ce.symbol('EmptySet');
-      args =
+      // Transform List/Tuple with 2 elements to Interval in set context
+      const transformedArgs = args.map((arg) =>
+        listToIntervalInSetContext(ce, arg)
+      );
+      const validatedArgs =
         validateArguments(
           ce,
-          flatten(args, 'Union'),
+          flatten(transformedArgs, 'Union'),
           parseType('(collection+) -> set')
-        ) ?? args;
+        ) ?? transformedArgs;
       // Even if there is only one argument, we still need to call Union
       // to canonicalize the argument, since it may not be a set (it could
       // be a collection)
-      return ce._fn('Union', args);
+      return ce._fn('Union', validatedArgs);
     },
     evaluate: union,
 

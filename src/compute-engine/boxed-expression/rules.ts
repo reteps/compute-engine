@@ -1,5 +1,6 @@
 import type { Expression } from '../../math-json/types';
 
+import { _BoxedExpression } from './abstract-boxed-expression';
 import type {
   BoxedRule,
   BoxedRuleSet,
@@ -333,27 +334,44 @@ function parseModifierExpression(parser: Parser): string | null {
 }
 
 /* Return an expression for a match/replace part of a rule if a LaTeX string
- or MathJSON expression
+ or MathJSON expression.
+
+ When `autoWildcard` is true (default for string rule parsing), single-character
+ symbols are automatically converted to wildcards (e.g., 'a' -> '_a'). This is
+ appropriate when parsing rule strings like "a*x -> 2*x" where pattern matching
+ is expected.
+
+ When `autoWildcard` is false (default for object rules), symbols are kept as
+ literals. This allows `.replace({match: 'a', replace: 2})` to match the literal
+ symbol 'a' rather than acting as a wildcard.
  */
 function parseRulePart(
   ce: ComputeEngine,
   rule?: string | SemiBoxedExpression | RuleReplaceFunction | RuleFunction,
-  options?: { canonical?: boolean }
+  options?: { canonical?: boolean; autoWildcard?: boolean }
 ): BoxedExpression | undefined {
   if (rule === undefined || typeof rule === 'function') return undefined;
   if (typeof rule === 'string') {
     let expr = ce.parse(rule, { canonical: options?.canonical ?? false });
-    expr = expr.map(
-      (x) => {
-        // Only transform single character symbols. Avoid \pi, \imaginaryUnit, etc..
-        if (x.symbol && x.symbol.length === 1) return ce.symbol('_' + x.symbol);
-        return x;
-      },
-      { canonical: false }
-    );
+    // Only auto-wildcard when explicitly requested (e.g., when parsing
+    // rule strings like "a*x -> 2*x"). For object rules, keep symbols literal.
+    if (options?.autoWildcard) {
+      expr = expr.map(
+        (x) => {
+          // Only transform single character symbols. Avoid \pi, \imaginaryUnit, etc..
+          if (x.symbol && x.symbol.length === 1)
+            return ce.symbol('_' + x.symbol);
+          return x;
+        },
+        { canonical: false }
+      );
+    }
     return expr;
   }
-  return ce.box(rule, { canonical: options?.canonical ?? false });
+  const canonical =
+    options?.canonical ??
+    (rule instanceof _BoxedExpression ? rule.isCanonical : false);
+  return ce.box(rule, { canonical });
 }
 
 /** A rule can be expressed as a string of the form
@@ -415,7 +433,7 @@ function parseRule(
 
         // Check for conditions
         const conditions = parseModifierExpression(parser);
-        if (conditions === null) return null;
+        if (conditions === null) return `${prefix}${id}`;
 
         if (!wildcardConditions[id]) wildcardConditions[id] = conditions;
         else wildcardConditions[id] += ',' + conditions;
@@ -488,19 +506,39 @@ function parseRule(
     },
   ];
   const canonical = options?.canonical ?? false;
+
+  // Push a clean scope that only inherits from the system scope (index 0),
+  // not from the global scope or user-defined scopes. This prevents user-defined
+  // symbols (like `x` used as a function name in `x(y+z)`) from interfering with
+  // rule parsing. The system scope contains all built-in definitions.
+  const systemScope = ce.contextStack[0]?.lexicalScope;
+  if (systemScope) {
+    ce.pushScope({ parent: systemScope, bindings: new Map() });
+  }
+
   const expr = ce.parse(rule);
+
   ce.latexDictionary = previousDictionary;
 
-  if (!expr.isValid || expr.operator !== 'Rule')
+  if (!expr.isValid || expr.operator !== 'Rule') {
+    if (systemScope) {
+      ce.popScope();
+    }
     throw new Error(
       `Invalid rule "${rule}"\n|   ${dewildcard(expr).toString()}\n|   A rule should be of the form:\n|   <match> -> <replace>; <condition>`
     );
+  }
 
   let [match, replace, condition] = expr.ops!;
 
   if (canonical) {
     match = match.canonical;
     replace = replace.canonical;
+  }
+
+  // Pop the clean scope AFTER canonicalization to avoid pollution
+  if (systemScope) {
+    ce.popScope();
   }
 
   // Check that all the wildcards in the replace also appear in the match
@@ -594,8 +632,20 @@ function boxRule(
     );
   }
 
-  ce.pushScope();
-  const matchExpr = parseRulePart(ce, match, options);
+  // Push a clean scope that only inherits from the system scope (index 0),
+  // not from the global scope or user-defined scopes. This prevents user-defined
+  // symbols (like `x` used as a function name in `x(y+z)`) from interfering with
+  // rule parsing. The system scope contains all built-in definitions.
+  const systemScope = ce.contextStack[0]?.lexicalScope;
+  if (systemScope) {
+    ce.pushScope({ parent: systemScope, bindings: new Map() });
+  } else {
+    ce.pushScope();
+  }
+  // Match patterns should never be canonicalized - they need to preserve their
+  // structure with wildcards for pattern matching. For example, ['Divide', '_a', '_a']
+  // should remain as a Divide expression, not be simplified to 1.
+  const matchExpr = parseRulePart(ce, match, { canonical: false });
   const replaceExpr = parseRulePart(ce, replace, options);
   ce.popScope();
 
@@ -689,8 +739,7 @@ export function applyRule(
   substitution: BoxedSubstitution,
   options?: Readonly<Partial<ReplaceOptions>>
 ): RuleStep | null {
-  const canonical =
-    options?.canonical ?? (expr.isCanonical || expr.isStructural);
+  let canonical = options?.canonical ?? (expr.isCanonical || expr.isStructural);
 
   let operandsMatched = false;
 
@@ -703,8 +752,20 @@ export function applyRule(
       return subExpr.value;
     });
 
-    if (operandsMatched)
+    // At least one operand (directly or recursively) matched: but continue onwards to match against
+    // the top-level expr., test against any 'condition', et cetera.
+    if (operandsMatched) {
+      // If new/replaced operands are all canonical, and options do not explicitly specify canonical
+      // status, then should be safe to mark as fully-canonical
+      if (
+        !canonical &&
+        options?.canonical === undefined &&
+        newOps.every((x) => x.isCanonical)
+      )
+        canonical = true;
+
       expr = expr.engine.function(expr.operator, newOps, { canonical });
+    }
   }
 
   // eslint-disable-next-line prefer-const
@@ -713,22 +774,27 @@ export function applyRule(
 
   if (canonical && match) {
     const awc = getWildcards(match);
-    const originalMatch = match;
-    match = match.canonical;
-    const bwc = getWildcards(match);
+    const canonicalMatch = match.canonical;
+    const bwc = getWildcards(canonicalMatch);
+    // If the canonical form of the match loses wildcards, this rule cannot match
+    // canonical expressions (they would already be simplified). Skip this rule.
     if (!awc.every((x) => bwc.includes(x)))
-      throw new Error(
-        `\n|   Invalid rule "${rule.id}"\n|   The canonical form of ${dewildcard(originalMatch).toString()} is "${dewildcard(match).toString()}" and it does not contain all the wildcards of the original match.\n|   This could indicate that the match expression in canonical form is already simplified and this rule may not be necessary`
-      );
+      return operandsMatched ? { value: expr, because } : null;
   }
 
   const useVariations = rule.useVariations ?? options?.useVariations ?? false;
+  const matchPermutations = options?.matchPermutations ?? true;
 
   // For debugging
   onBeforeMatch?.(rule, expr);
 
   const sub = match
-    ? expr.match(match, { substitution, ...options, useVariations })
+    ? expr.match(match, {
+        substitution,
+        useVariations,
+        recursive: false,
+        matchPermutations,
+      })
     : {};
 
   // If the `expr` does not match the pattern, the rule doesn't apply
@@ -762,6 +828,16 @@ export function applyRule(
     }
   }
 
+  // Have a (direct) match: in this case, consider the canonical-status of the replacement, too.
+  if (
+    !canonical &&
+    options?.canonical === undefined &&
+    replace instanceof _BoxedExpression &&
+    replace.isCanonical
+  )
+    canonical = true;
+
+  //@note: '.subs()' acts like an expr. 'clone' here (in case of an empty substitution)
   const result =
     typeof replace === 'function'
       ? replace(expr, sub)
@@ -775,6 +851,8 @@ export function applyRule(
   if (isRuleStep(result))
     return canonical ? { ...result, value: result.value.canonical } : result;
 
+  // (Need to request the canonical variant to account for case of a custom replace: which may not
+  // have returned canonical.)
   return { value: canonical ? result.canonical : result, because };
 }
 
@@ -783,7 +861,7 @@ export function applyRule(
  * and the set of rules that were applied.
  *
  * The `replace` function can be used to apply a rule to a non-canonical
- * expression. @fixme: account for options.canonical
+ * expression.
  *
  */
 export function replace(

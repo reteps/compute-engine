@@ -18,6 +18,49 @@ import { _BoxedOperatorDefinition } from './boxed-operator-definition';
 import { _BoxedValueDefinition } from './boxed-value-definition';
 import { _BoxedExpression } from './abstract-boxed-expression';
 
+/**
+ * Check if an expression contains symbolic transcendental functions of constants
+ * (like ln(2), sin(1), etc.) that should not be evaluated numerically.
+ *
+ * This excludes transcendentals that simplify to exact values, such as:
+ * - ln(e) -> 1
+ * - sin(0) -> 0
+ * - cos(0) -> 1
+ */
+export function hasSymbolicTranscendental(expr: BoxedExpression): boolean {
+  const op = expr.operator;
+  // Transcendental functions applied to numeric constants
+  const transcendentals = [
+    'Ln',
+    'Log',
+    'Log2',
+    'Log10',
+    'Sin',
+    'Cos',
+    'Tan',
+    'Exp',
+  ];
+  if (transcendentals.includes(op) && expr.op1?.isConstant) {
+    // Check if this transcendental simplifies to an exact rational value
+    // (e.g., ln(e) = 1, sin(0) = 0). If so, it's not truly a
+    // "symbolic transcendental" that needs to be preserved.
+    const simplified = expr.simplify();
+    // If the simplified result is exact (integer or rational),
+    // it doesn't need symbolic preservation
+    if (simplified.isRational) {
+      return false;
+    }
+    return true;
+  }
+  // Recursively check sub-expressions
+  if (expr.ops) {
+    for (const child of expr.ops) {
+      if (hasSymbolicTranscendental(child)) return true;
+    }
+  }
+  return false;
+}
+
 export function isDictionary(
   expr: any | null | undefined
 ): expr is DictionaryInterface {
@@ -300,7 +343,12 @@ export function isValidValueDef(def: any): def is Partial<ValueDefinition> {
 
   if (isBoxedExpression(def)) return false;
 
-  if ('value' in def || 'constant' in def || 'inferred' in def) {
+  if (
+    'value' in def ||
+    'constant' in def ||
+    'inferred' in def ||
+    'subscriptEvaluate' in def
+  ) {
     // If the `type` field is a function, it's an operator definition
     if ('type' in def && typeof def.type === 'function') return false;
 

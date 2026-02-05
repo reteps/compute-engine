@@ -86,6 +86,26 @@ describe('MATCHFIX synonyms', () => {
       box       = ["Delimiter", ["Sequence", "a", "b", "c"], "(,)"]
       canonical = ["Triple", "a", "b", "c"]
     `));
+  test('\\mathopen(a, b, c\\mathclose)', () =>
+    expect(check(`\\mathopen(a, b, c\\mathclose)`)).toMatchInlineSnapshot(`
+      box       = ["Delimiter", ["Sequence", "a", "b", "c"], "(,)"]
+      canonical = ["Triple", "a", "b", "c"]
+    `));
+  test('\\mathopen\\lparen a, b, c\\mathclose\\rparen', () =>
+    expect(check(`\\mathopen\\lparen a, b, c\\mathclose\\rparen`))
+      .toMatchInlineSnapshot(`
+      box       = ["Delimiter", ["Sequence", "a", "b", "c"], "(,)"]
+      canonical = ["Triple", "a", "b", "c"]
+    `));
+  // Braced form: \mathopen{(}
+  test('\\mathopen{(}a, b, c\\mathclose{)}', () =>
+    expect(check(`\\mathopen{(}a, b, c\\mathclose{)}`)).toMatchInlineSnapshot(`
+      box       = ["Delimiter", ["Sequence", "a", "b", "c"], "(,)"]
+      canonical = ["Triple", "a", "b", "c"]
+    `));
+  test('\\mathopen{\\lbrack}1, 2\\mathclose{\\rbrack}', () =>
+    expect(check(`\\mathopen{\\lbrack}1, 2\\mathclose{\\rbrack}`))
+      .toMatchInlineSnapshot(`["List", 1, 2]`));
 });
 
 describe('MATCHFIX abs and norm', () => {
@@ -110,12 +130,22 @@ describe('MATCHFIX abs and norm', () => {
       simplify  = |a| + 3
     `));
 
+  test('||3-5|-4|', () => {
+    const expr = engine.parse('||3-5|-4|');
+    expect(expr.isValid).toBe(true);
+    expect(expr.evaluate().toString()).toBe('2');
+  });
+
   test('||a||', () =>
-    expect(check('||a||')).toMatchInlineSnapshot(`["Norm", "a"]`));
+    expect(check('||a||')).toMatchInlineSnapshot(`
+      box       = ["Norm", "a"]
+      eval-auto = |a|
+    `));
   test('||a||+|b|', () =>
-    expect(check('||a||+|b|')).toMatchInlineSnapshot(
-      `["Add", ["Norm", "a"], ["Abs", "b"]]`
-    ));
+    expect(check('||a||+|b|')).toMatchInlineSnapshot(`
+      box       = ["Add", ["Norm", "a"], ["Abs", "b"]]
+      eval-auto = |a| + |b|
+    `));
 });
 
 describe('MATCHFIX invalid', () => {

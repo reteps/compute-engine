@@ -78,10 +78,23 @@ const OPERATORS: Record<
 > = {
   Add: [
     (expr, serialize) => {
+      let ops = expr.ops ?? [];
+
+      // For binary sums like "-x^2 + 1", swap to display as "1 - x^2"
+      // Only applies when: exactly 2 terms, first is negative, second is a positive constant
+      if (
+        ops.length === 2 &&
+        ops[0].operator === 'Negate' &&
+        ops[1].operator !== 'Negate' &&
+        ops[1].isNumberLiteral
+      ) {
+        ops = [ops[1], ops[0]];
+      }
+
       // Use a reduce, so that if the second argument starts with a + or -
       // we don't include a '+' in the result
       return (
-        expr.ops?.reduce((acc: string, x) => {
+        ops.reduce((acc: string, x) => {
           if (x.operator === 'Negate') {
             const rhs = serialize(x.op1, 10);
             if (acc === '') return `-${rhs}`;
@@ -100,7 +113,8 @@ const OPERATORS: Record<
       const base = serialize(expr.op1, 14);
       // Always wrap the base in parentheses if power to avoid ambiguity,
       // i.e. -3^2 -> -(3^2)
-      if (base === 'Power') return `-(${base})`;
+      const op = expr.op1?.operator;
+      if (op === 'Power' || op === 'Square') return `-(${base})`;
       return `-${base}`;
     },
     14,
@@ -159,7 +173,8 @@ const OPERATORS: Record<
       if (exponent === '1') return serialize(expr.op1);
       if (exponent === '(1/2)' || exponent === '1/2' || exponent === '0.5')
         return `sqrt(${serialize(expr.op1)})`;
-      if (exponent === '-0.5') return `(1/sqrt(${serialize(expr.op1)}))`;
+      if (exponent === '-0.5' || exponent === '-1/2' || exponent === '(-1/2)')
+        return `1 / sqrt(${serialize(expr.op1)})`;
       let base = serialize(expr.op1, 14);
       // Always wrap the base in parentheses if negative to avoid ambiguity,
       // i.e. -3^2 -> (-3)^2
@@ -186,21 +201,39 @@ const FUNCTIONS: Record<
   string | ((expr: BoxedExpression, serialize: AsciiMathSerializer) => string)
 > = {
   Abs: (expr: BoxedExpression, serialize) => `|${serialize(expr.op1)}|`,
+  Norm: (expr: BoxedExpression, serialize) => `||${serialize(expr.op1)}||`,
 
+  // Trigonometric functions
   Sin: 'sin',
   Cos: 'cos',
   Tan: 'tan',
   Sec: 'sec',
   Csc: 'csc',
+  Cot: 'cot',
+
+  // Inverse trigonometric functions
   Arcsin: 'arcsin',
   Arccos: 'arccos',
   Arctan: 'arctan',
+  Arcsec: 'arcsec',
+  Arccsc: 'arccsc',
+  Arccot: 'arccot',
+
+  // Hyperbolic functions
   Sinh: 'sinh',
   Cosh: 'cosh',
   Tanh: 'tanh',
   Sech: 'sech',
   Csch: 'csch',
   Coth: 'coth',
+
+  // Inverse hyperbolic functions (ISO 80000-2 standard names)
+  Arsinh: 'arsinh',
+  Arcosh: 'arcosh',
+  Artanh: 'artanh',
+  Arsech: 'arsech',
+  Arcsch: 'arcsch',
+  Arcoth: 'arcoth',
 
   Ceil: 'ceil', // also: (expr, serialize) => `|~${serialize(expr.op1)}~|`,
   Exp: 'exp',
@@ -354,11 +387,12 @@ function bigOp(
     const b = fn.op1 ?? fn;
     if (b.operator === 'Block') body = serialize(b.op1 ?? b);
     else body = serialize(b);
-  } else if (fn?.symbol) {
+  } else if (fn) {
+    // Handle symbols and general expressions (e.g., Multiply, Add)
     args = [];
     body = serialize(fn);
   } else {
-    return 'int()';
+    return `${op}()`;
   }
 
   let result = op;

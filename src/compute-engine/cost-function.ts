@@ -66,6 +66,53 @@ function numericCostFunction(n: NumericValue | number): number {
  *
  */
 export function costFunction(expr: BoxedExpression): number {
+  // Special-case: Encourage the "exp/log separation" rewrite used by
+  // `simplifyLog()` for base-10 logs:
+  //
+  //   exp(log(x) + y)  ->  x^(1/ln(10)) * e^y
+  //
+  // Without this tweak, the separated form can look more expensive than
+  // `exp(log(x)+y)` because it introduces an explicit `1/ln(10)` exponent.
+  //
+  // This is intentionally narrow and only affects the specific separated form
+  // we generate (a 2-factor Multiply). It exists to prevent a readability
+  // rewrite from being rejected purely by the default cost heuristic.
+  const expLogSepCost = (() => {
+    if (expr.operator !== 'Multiply' || !expr.ops || expr.ops.length !== 2)
+      return null;
+
+    const match = (
+      xPow: BoxedExpression,
+      ePow: BoxedExpression
+    ): { xBase: BoxedExpression; eExp: BoxedExpression } | null => {
+      if (ePow.operator !== 'Power') return null;
+      if (ePow.op1?.symbol !== 'ExponentialE') return null;
+      if (!ePow.op2) return null;
+
+      if (xPow.operator !== 'Power') return null;
+      if (!xPow.op1 || !xPow.op2) return null;
+
+      // Match exponent: 1/ln(10)
+      const exponent = xPow.op2;
+      if (exponent.operator !== 'Divide') return null;
+      if (exponent.op1?.is(1) !== true) return null;
+
+      const denom = exponent.op2;
+      if (denom?.operator !== 'Ln') return null;
+      if (denom.op1?.is(10) !== true) return null;
+
+      return { xBase: xPow.op1, eExp: ePow.op2 };
+    };
+
+    const [a, b] = expr.ops;
+    const m = match(a, b) ?? match(b, a);
+    if (!m) return null;
+
+    // Approximate the cost of exp(log(x)+y): Add(Log(x), y) ≈ 12 + cost(x) + cost(y)
+    return 12 + costFunction(m.xBase) + costFunction(m.eExp);
+  })();
+  if (expLogSepCost !== null) return expLogSepCost;
+
   //
   // 1/ Symbols
   //
@@ -82,12 +129,105 @@ export function costFunction(expr: BoxedExpression): number {
   let nameCost = 2;
   if (['Add'].includes(name)) nameCost = 3;
   else if (['Subtract', 'Negate'].includes(name)) nameCost = 4;
-  else if (['Square', 'Sqrt'].includes(name)) nameCost = 5;
-  else if (['Power', 'Root'].includes(name))
-    // We want 2q^2 to be less expensive than 2qq, so we ignore the exponent
-    return costFunction(expr.ops![1]);
-  else if (['Multiply'].includes(name)) nameCost = 7;
-  else if (['Divide'].includes(name)) nameCost = 8;
+  else if (name === 'Sqrt') {
+    // Sqrt with perfect squares inside should be more expensive
+    // because √(x²y) should simplify to |x|√y
+    const arg = expr.ops?.[0];
+    if (arg?.operator === 'Multiply' && arg.ops) {
+      // Check if any factor is a perfect square (Power with even exponent)
+      for (const factor of arg.ops) {
+        if (factor.operator === 'Power' && factor.op2?.isEven === true) {
+          // Add a penalty to encourage factoring out perfect squares
+          return 5 + costFunction(arg) + 6;
+        }
+      }
+    }
+    // Also check if arg is directly a perfect square
+    if (arg?.operator === 'Power' && arg.op2?.isEven === true) {
+      return 5 + costFunction(arg) + 6;
+    }
+    // Sqrt(x^{odd}) where odd > 1 can be factored: sqrt(x^5) -> |x|^2 * sqrt(x)
+    if (
+      arg?.operator === 'Power' &&
+      arg.op2?.isOdd === true &&
+      arg.op2?.isInteger === true
+    ) {
+      const exp = arg.op2;
+      // exp > 1 means (exp - 1) / 2 > 0, i.e., we can factor out something
+      const n = exp.numericValue;
+      if (typeof n === 'number' && n > 1) {
+        // Higher penalty (10) to ensure factored form |x|^n * sqrt(x) is preferred
+        return 5 + costFunction(arg) + 10;
+      }
+    }
+    nameCost = 5;
+  } else if (['Square', 'Abs'].includes(name)) nameCost = 5;
+  else if (name === 'Power') {
+    // We want 2q^2 to be less expensive than 2qq, so we mostly ignore the base
+    // when the base is simple. However:
+    // - If the base is Negate, account for it since (-x)^n and -x^n have same cost
+    // - If the base is Multiply, account for its complexity so (ab)^n isn't
+    //   artificially cheaper than the distributed form a^n * b^n
+    const base = expr.ops![0];
+    const exp = expr.ops![1];
+    const expCost = costFunction(exp);
+    if (base.operator === 'Negate') {
+      // Add cost for the negate so (-x)^n isn't artificially cheaper than -x^n
+      return expCost + 4; // 4 is the Negate nameCost
+    }
+    if (base.operator === 'Multiply' && base.ops) {
+      // Check if there's a negative coefficient and a fractional exponent
+      // (negative)^{p/q} where q is odd should factor out the sign for correct real evaluation
+      const hasNegativeCoef = base.ops.some(
+        (f) => f.isNumberLiteral && f.isNegative === true
+      );
+      if (hasNegativeCoef && exp.isRational === true && !exp.isInteger) {
+        // Heavy penalty to encourage factoring out the negative sign
+        // This is needed because (-a*x)^{p/q} gives complex results but
+        // -(a*x)^{p/q} gives correct real results when p,q are both odd
+        return expCost + costFunction(base) + 15;
+      }
+      // For (a*b*...)^n, include the base's complexity so power distribution
+      // (a*b)^n -> a^n * b^n can be applied when appropriate
+      return expCost + costFunction(base);
+    }
+    return expCost;
+  } else if (name === 'Root') {
+    // Root(x^n, n) should have comparable cost to |x|
+    // Use a base cost similar to Sqrt
+    nameCost = 5;
+  } else if (['Multiply'].includes(name)) {
+    // We want 2x to be less expensive than x + x, so if the first operand
+    // is a small number coefficient, treat it as cheaper
+    const ops = expr.ops ?? [];
+    if (ops.length === 2 && ops[0].isNumberLiteral) {
+      const coef = ops[0].numericValue;
+      // Check if it's a small integer or rational (handles both number and NumericValue types)
+      let isSmallCoef = false;
+      if (typeof coef === 'number') {
+        isSmallCoef = Number.isInteger(coef) && Math.abs(coef) <= 10;
+      } else if (coef) {
+        // Accept small integers or any finite rational as coefficient
+        const type = coef.type;
+        if (type === 'finite_integer' && Math.abs(coef.re) <= 10) {
+          isSmallCoef = true;
+        } else if (type === 'finite_rational') {
+          isSmallCoef = true;
+        }
+      }
+      if (isSmallCoef) {
+        // Treat coefficient multiplication as equivalent to Add
+        // Special case: n*ln(x) or n*log(x) should be very cheap (preferred form)
+        const secondOp = ops[1].operator;
+        if (['Ln', 'Log', 'Lb'].includes(secondOp)) {
+          // n*ln(x) is the standard form for log(x^n), make it cheaper
+          return 2 + costFunction(ops[1]);
+        }
+        return 3 + costFunction(ops[1]);
+      }
+    }
+    nameCost = 7;
+  } else if (['Divide'].includes(name)) nameCost = 8;
   else if (['Ln', 'Exp', 'Log', 'Lb'].includes(name)) nameCost = 9;
   else if (['Cos', 'Sin', 'Tan'].includes(name)) nameCost = 10;
   else nameCost = 11;

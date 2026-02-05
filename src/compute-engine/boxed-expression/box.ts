@@ -9,8 +9,13 @@ import type {
   Scope,
 } from '../global-types';
 
-import { Expression, MathJsonSymbol } from '../../math-json/types';
 import {
+  Expression,
+  ExpressionObject,
+  MathJsonSymbol,
+} from '../../math-json/types';
+import {
+  hasMetaData,
   machineValue,
   matchesNumber,
   matchesString,
@@ -198,7 +203,11 @@ export function boxFunction(
       const n = asBigint(ops[0]);
       if (n !== null) {
         const d = asBigint(ops[1]);
-        if (d !== null) return ce.number([n, d], options);
+        if (d !== null) {
+          // Handle division by zero: 0/0 = NaN, a/0 = ~∞
+          if (d === 0n) return n === 0n ? ce.NaN : ce.ComplexInfinity;
+          return ce.number([n, d], options);
+        }
       }
       name = 'Divide';
     }
@@ -397,17 +406,25 @@ export function box(
   // Box a MathJSON object literal
   //
   if (typeof expr === 'object') {
+    // Extract metadata (latex, wikidata) from the MathJSON object if present
+    const metadata = hasMetaData(expr as ExpressionObject)
+      ? {
+          latex: (expr as ExpressionObject & { latex?: string }).latex,
+          wikidata: (expr as ExpressionObject & { wikidata?: string }).wikidata,
+        }
+      : undefined;
+
     if ('fn' in expr) {
       const [fnName, ...ops] = expr.fn;
       return canonicalForm(
-        boxFunction(ce, fnName, ops, { canonical, structural }),
+        boxFunction(ce, fnName, ops, { canonical, structural, metadata }),
         options.canonical!,
         options.scope
       );
     }
-    if ('str' in expr) return new BoxedString(ce, expr.str);
-    if ('sym' in expr) return ce.symbol(expr.sym, { canonical });
-    if ('num' in expr) return ce.number(expr, { canonical });
+    if ('str' in expr) return new BoxedString(ce, expr.str, metadata);
+    if ('sym' in expr) return ce.symbol(expr.sym, { canonical, metadata });
+    if ('num' in expr) return ce.number(expr, { canonical, metadata });
     if ('dict' in expr)
       return new BoxedDictionary(ce, expr.dict, { canonical });
 
@@ -519,13 +536,15 @@ function makeCanonicalFunction(
     result = new BoxedFunction(
       ce,
       name,
-      validateArguments(
-        ce,
-        xs,
-        opDef.signature.type,
-        opDef.lazy,
-        opDef.broadcastable
-      ) ?? xs,
+      opDef.inferredSignature
+        ? xs
+        : (validateArguments(
+            ce,
+            xs,
+            opDef.signature.type,
+            opDef.lazy,
+            opDef.broadcastable
+          ) ?? xs),
       { metadata, canonical: true, scope }
     );
     return result;
@@ -570,13 +589,18 @@ function makeCanonicalFunction(
     opDef.associative ? name : undefined
   );
 
-  const adjustedArgs = validateArguments(
-    ce,
-    args,
-    opDef.signature.type,
-    opDef.lazy,
-    opDef.broadcastable
-  );
+  // Skip validation for function literals with inferred signatures.
+  // These will be validated during evaluation by the lambda function,
+  // which handles currying and partial application.
+  const adjustedArgs = opDef.inferredSignature
+    ? null
+    : validateArguments(
+        ce,
+        args,
+        opDef.signature.type,
+        opDef.lazy,
+        opDef.broadcastable
+      );
 
   // If we have some adjusted arguments, the arguments did not
   // match the parameters of the signature. We're done.

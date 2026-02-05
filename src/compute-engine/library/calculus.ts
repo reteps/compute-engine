@@ -1,6 +1,7 @@
 import type { BoxedExpression, SymbolDefinitions } from '../global-types';
 
 import { checkType } from '../boxed-expression/validate';
+import { hasSymbolicTranscendental } from '../boxed-expression/utils';
 
 import {
   canonicalFunctionLiteral,
@@ -158,7 +159,15 @@ volumes
         }
         f = f?.canonical;
         // Avoid recursive evaluation
-        return f?.operator === 'D' ? f : f?.evaluate();
+        if (f?.operator === 'D') return f;
+        // Avoid evaluating symbolic derivative applications like Digamma'(x)
+        // which would incorrectly evaluate to 0
+        if (f?.operator === 'Apply' && f.op1?.operator === 'Derivative')
+          return f;
+        // If the result contains symbolic transcendentals (like ln(2)),
+        // return it without full evaluation to preserve the symbolic form
+        if (f && hasSymbolicTranscendental(f)) return f;
+        return f?.evaluate();
       },
     },
 
@@ -204,7 +213,18 @@ volumes
           const firstLimit = ops[1];
           const [lower, upper] = [firstLimit.op2.N().re, firstLimit.op3.N().re];
           if (isNaN(lower) || isNaN(upper)) return undefined;
-          const jsf = f.compile();
+
+          // Get the integration variable from the limits
+          const variable = firstLimit.op1.symbol ?? 'x';
+
+          // Compile the integrand as a function.
+          // If it's already a Function expression, compile directly.
+          // Otherwise wrap it in a Function to compile correctly for numerical eval.
+          // This converts e.g. 'x' to ['Function', 'x', 'x'] -> (x) => x
+          const fnExpr =
+            f.operator === 'Function' ? f : ce.box(['Function', f, variable]);
+          const jsf = fnExpr.compile();
+
           const mce = monteCarloEstimate(
             jsf,
             lower,
@@ -228,6 +248,7 @@ volumes
           return undefined;
         }
 
+        let isIndefinite = true;
         for (let i = limitsSequence.length - 1; i >= 0; i--) {
           const [varExpr, lower, upper] = limitsSequence[i].ops!;
           let variable = varExpr.symbol;
@@ -244,6 +265,7 @@ volumes
             if (lower.symbol === 'Nothing' && upper.symbol === 'Nothing') {
               expr = fAntideriv;
             } else {
+              isIndefinite = false;
               const F = ce.box(['Function', antideriv, variable]);
               expr = ce.box(['EvaluateAt', F, lower, upper]);
             }
@@ -251,13 +273,22 @@ volumes
             if (lower.symbol === 'Nothing' && upper.symbol === 'Nothing') {
               expr = antideriv;
             } else {
+              isIndefinite = false;
               const F = ce.box(['Function', antideriv, variable]);
               expr = ce.box(['EvaluateAt', F, lower, upper]);
             }
           }
         }
-        if (expr.operator !== 'Integrate')
+        if (expr.operator !== 'Integrate') {
+          // For indefinite integrals with symbolic transcendental constants
+          // (like ln(2)), don't call evaluate/simplify as it would convert
+          // them to numeric values. Otherwise, simplify for cleaner output.
+          if (isIndefinite) {
+            if (hasSymbolicTranscendental(expr)) return expr;
+            return expr.simplify();
+          }
           return expr.evaluate({ numericApproximation });
+        }
         return expr;
       },
     },
@@ -297,7 +328,7 @@ volumes
       broadcastable: false,
 
       lazy: true,
-      signature: '(index:symbol, lower:number, upper:number) -> tuple',
+      signature: '(index:symbol, lower:value, upper:value) -> tuple',
       canonical: (ops, { engine }) => canonicalLimits(ops, { engine }) ?? null,
     },
   },

@@ -17,6 +17,32 @@ import { Expression } from '../../../math-json';
 import { DEFINITIONS_INEQUALITIES } from './definitions-relational-operators';
 
 // See https://en.wikipedia.org/wiki/List_of_logic_symbols
+//
+// ## Operator Precedence (higher number = binds tighter)
+//
+// The precedence hierarchy ensures expressions parse naturally:
+//
+// | Precedence | Operators                          | Example                           |
+// |------------|------------------------------------|------------------------------------|
+// | 880        | Not (¬, \lnot, \neg)               | ¬p binds only to p                |
+// | 270        | To (→ for function mapping)        | f: A → B                          |
+// | 245        | Comparisons (=, <, >, ≤, ≥, ≠)     | x = 1                             |
+// | 240        | Set relations (⊂, ⊆, ∈, etc.)      | x ∈ S                             |
+// | 235        | And (∧, \land, \wedge)             | p ∧ q                             |
+// | 232        | Xor, Nand, Nor                     | p ⊕ q                             |
+// | 230        | Or (∨, \lor, \vee)                 | p ∨ q                             |
+// | 220        | Implies (→, ⇒, \implies)           | p → q                             |
+// | 219        | Equivalent (↔, ⇔, \iff)            | p ↔ q                             |
+// | 200        | Quantifiers (∀, ∃)                 | ∀x, P(x)                          |
+//
+// This means:
+// - `x = 1 ∨ y = 2` parses as `(x = 1) ∨ (y = 2)` (comparisons bind tighter than Or)
+// - `p ∧ q ∨ r` parses as `(p ∧ q) ∨ r` (And binds tighter than Or)
+// - `p ∨ q → r` parses as `(p ∨ q) → r` (Or binds tighter than Implies)
+// - `¬p ∧ q` parses as `(¬p) ∧ q` (Not only applies to immediately following atom)
+//
+// To negate a compound expression, use parentheses: `¬(p ∧ q)`
+//
 
 export const DEFINITIONS_LOGIC: LatexDictionary = [
   // Constants
@@ -58,42 +84,45 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
   },
 
   // Operators
+  // Logic operators have lower precedence than comparisons (245)
+  // so that `x = 1 \lor x = 2` parses as `(x = 1) \lor (x = 2)`
+  // See https://github.com/cortex-js/compute-engine/issues/243
   {
     name: 'And',
     kind: 'infix',
     latexTrigger: ['\\land'],
-    precedence: 317,
+    precedence: 235,
     // serialize: '\\land',
   },
-  { kind: 'infix', latexTrigger: ['\\wedge'], parse: 'And', precedence: 317 },
-  { kind: 'infix', latexTrigger: '\\&', parse: 'And', precedence: 317 },
+  { kind: 'infix', latexTrigger: ['\\wedge'], parse: 'And', precedence: 235 },
+  { kind: 'infix', latexTrigger: '\\&', parse: 'And', precedence: 235 },
   {
     kind: 'infix',
     latexTrigger: '\\operatorname{and}',
     parse: 'And',
-    precedence: 317,
+    precedence: 235,
   },
 
   {
     name: 'Or',
     kind: 'infix',
     latexTrigger: ['\\lor'],
-    precedence: 310,
+    precedence: 230,
   },
-  { kind: 'infix', latexTrigger: ['\\vee'], parse: 'Or', precedence: 310 },
-  { kind: 'infix', latexTrigger: '\\parallel', parse: 'Or', precedence: 310 },
+  { kind: 'infix', latexTrigger: ['\\vee'], parse: 'Or', precedence: 230 },
+  { kind: 'infix', latexTrigger: '\\parallel', parse: 'Or', precedence: 230 },
   {
     kind: 'infix',
     latexTrigger: '\\operatorname{or}',
     parse: 'Or',
-    precedence: 310,
+    precedence: 230,
   },
 
   {
     name: 'Xor',
     kind: 'infix',
     latexTrigger: ['\\veebar'],
-    precedence: 315,
+    precedence: 232,
   },
   // Possible alt: \oplus ⊕ U+2295
 
@@ -114,14 +143,14 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     name: 'Nand',
     kind: 'infix',
     latexTrigger: ['\\barwedge'],
-    precedence: 315,
+    precedence: 232,
     // serialize: '\\mid',
   },
   {
     name: 'Nor',
     kind: 'infix',
     latexTrigger: ['\u22BD'], // bar vee
-    precedence: 315,
+    precedence: 232,
     // serialize: '\\downarrow',
   },
   // Functions
@@ -156,6 +185,27 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     associativity: 'right',
     parse: 'Implies',
   },
+  {
+    latexTrigger: ['\\rightarrow'],
+    kind: 'infix',
+    precedence: 220,
+    associativity: 'right',
+    parse: 'Implies',
+  },
+  {
+    latexTrigger: ['\\Longrightarrow'],
+    kind: 'infix',
+    precedence: 220,
+    associativity: 'right',
+    parse: 'Implies',
+  },
+  {
+    latexTrigger: ['\\longrightarrow'],
+    kind: 'infix',
+    precedence: 220,
+    associativity: 'right',
+    parse: 'Implies',
+  },
 
   {
     name: 'Equivalent', // MathML: identical to, Mathematica: Congruent
@@ -166,6 +216,27 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
   },
   {
     latexTrigger: ['\\Leftrightarrow'],
+    kind: 'infix',
+    associativity: 'right',
+    precedence: 219,
+    parse: 'Equivalent',
+  },
+  {
+    latexTrigger: ['\\leftrightarrow'],
+    kind: 'infix',
+    associativity: 'right',
+    precedence: 219,
+    parse: 'Equivalent',
+  },
+  {
+    latexTrigger: ['\\Longleftrightarrow'],
+    kind: 'infix',
+    associativity: 'right',
+    precedence: 219,
+    parse: 'Equivalent',
+  },
+  {
+    latexTrigger: ['\\longleftrightarrow'],
     kind: 'infix',
     associativity: 'right',
     precedence: 219,
@@ -224,7 +295,7 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     kind: 'prefix',
     latexTrigger: ['\\forall'],
     precedence: 200, // Has to be lower than COMPARISON_PRECEDENCE
-    serialize: '\\forall',
+    serialize: serializeQuantifier('\\forall'),
     parse: parseQuantifier('ForAll'),
   },
   {
@@ -232,7 +303,7 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     kind: 'prefix',
     latexTrigger: ['\\exists'],
     precedence: 200, // Has to be lower than COMPARISON_PRECEDENCE,
-    serialize: '\\exists',
+    serialize: serializeQuantifier('\\exists'),
     parse: parseQuantifier('Exists'),
   },
   {
@@ -240,7 +311,7 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     kind: 'prefix',
     latexTrigger: ['\\exists', '!'],
     precedence: 200, // Has to be lower than COMPARISON_PRECEDENCE,
-    serialize: '\\exists!',
+    serialize: serializeQuantifier('\\exists!'),
     parse: parseQuantifier('ExistsUnique'),
   },
   {
@@ -248,7 +319,7 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     kind: 'prefix',
     latexTrigger: ['\\lnot', '\\forall'],
     precedence: 200, // Has to be lower than COMPARISON_PRECEDENCE
-    serialize: '\\lnot\\forall',
+    serialize: serializeQuantifier('\\lnot\\forall'),
     parse: parseQuantifier('NotForAll'),
   },
   {
@@ -256,7 +327,7 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
     kind: 'prefix',
     latexTrigger: ['\\lnot', '\\exists'],
     precedence: 200, // Has to be lower than COMPARISON_PRECEDENCE,
-    serialize: '\\lnot\\exists',
+    serialize: serializeQuantifier('\\lnot\\exists'),
     parse: parseQuantifier('NotExists'),
   },
 
@@ -320,7 +391,7 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
       const h = operator(body);
       if (!h) return null;
       if (!DEFINITIONS_INEQUALITIES.some((x) => x.name === h)) return null;
-      return ['Boole', body];
+      return ['Boole', body] as Expression;
     },
   },
 
@@ -332,16 +403,69 @@ export const DEFINITIONS_LOGIC: LatexDictionary = [
       const h = operator(body);
       if (!h) return null;
       if (!DEFINITIONS_INEQUALITIES.some((x) => x.name === h)) return null;
-      return ['Boole', body];
+      return ['Boole', body] as Expression;
+    },
+  },
+
+  // Predicate application in First-Order Logic.
+  // ["Predicate", "P", "x", "y"] serializes to "P(x, y)"
+  {
+    name: 'Predicate',
+    serialize: (serializer: Serializer, expr: Expression): string => {
+      const args = operands(expr);
+      if (args.length === 0) return '';
+      const pred = args[0];
+      const predStr =
+        typeof pred === 'string' ? pred : serializer.serialize(pred);
+      if (args.length === 1) return predStr;
+      const argStrs = args.slice(1).map((arg) => serializer.serialize(arg));
+      return `${predStr}(${argStrs.join(', ')})`;
     },
   },
 ];
+
+function serializeQuantifier(
+  quantifierSymbol: string
+): (serializer: Serializer, expr: Expression) => string {
+  return (serializer, expr) => {
+    const args = operands(expr);
+    if (args.length === 0) return quantifierSymbol;
+    if (args.length === 1)
+      return `${quantifierSymbol} ${serializer.serialize(args[0])}`;
+
+    // args[0] is the bound variable/condition, args[1] is the body
+    const boundVar = serializer.serialize(args[0]);
+    const body = serializer.serialize(args[1]);
+    return `${quantifierSymbol} ${boundVar}, ${body}`;
+  };
+}
+
+// Condition function for tight quantifier binding - stops at logical connectives
+function tightBindingCondition(
+  p: Parser,
+  terminator: Readonly<Terminator>
+): boolean {
+  return (
+    p.peek === '\\to' ||
+    p.peek === '\\rightarrow' ||
+    p.peek === '\\implies' ||
+    p.peek === '\\Rightarrow' ||
+    p.peek === '\\iff' ||
+    p.peek === '\\Leftrightarrow' ||
+    p.peek === '\\land' ||
+    p.peek === '\\wedge' ||
+    p.peek === '\\lor' ||
+    p.peek === '\\vee' ||
+    (terminator.condition?.(p) ?? false)
+  );
+}
 
 function parseQuantifier(
   kind: 'NotForAll' | 'NotExists' | 'ForAll' | 'Exists' | 'ExistsUnique'
 ): (parser: Parser, terminator: Readonly<Terminator>) => Expression | null {
   return (parser, terminator) => {
     const index = parser.index;
+    const useTightBinding = parser.options.quantifierScope !== 'loose';
 
     // There are several acceptable forms:
     // - \forall x, x>0
@@ -373,10 +497,25 @@ function parseQuantifier(
         parser.match(':') ||
         parser.match('\\colon')
       ) {
-        const body = parser.parseExpression(terminator);
+        // Parse body with optional tight binding (stops at logical connectives)
+        // Tight binding follows standard FOL convention where quantifier scope
+        // extends only to the immediately following well-formed formula.
+        const bodyTerminator = useTightBinding
+          ? {
+              ...terminator,
+              condition: (p: Parser) => tightBindingCondition(p, terminator),
+            }
+          : terminator;
+        // Enter quantifier scope so predicates are recognized
+        parser.enterQuantifierScope();
+        const body = parser.parseExpression(bodyTerminator);
+        parser.exitQuantifierScope();
         return [kind, symbol, missingIfEmpty(body)] as Expression;
       }
+      // Enter quantifier scope so predicates are recognized
+      parser.enterQuantifierScope();
       const body = parser.parseEnclosure();
+      parser.exitQuantifierScope();
       if (body) return [kind, symbol, missingIfEmpty(body)];
     }
 
@@ -390,11 +529,25 @@ function parseQuantifier(
     // Either a separator or a parenthesis
     parser.skipSpace();
     if (parser.matchAny([',', '\\mid', ':', '\\colon'])) {
-      const body = parser.parseExpression(terminator);
+      // Parse body with optional tight binding
+      const bodyTerminator = useTightBinding
+        ? {
+            ...terminator,
+            condition: (p: Parser) => tightBindingCondition(p, terminator),
+          }
+        : terminator;
+      // Enter quantifier scope so predicates are recognized
+      parser.enterQuantifierScope();
+      const body = parser.parseExpression(bodyTerminator);
+      parser.exitQuantifierScope();
       return [kind, condition, missingIfEmpty(body)] as Expression;
     }
     if (parser.match('(')) {
+      // Parenthesized body - parse normally within the parens
+      // Enter quantifier scope so predicates are recognized
+      parser.enterQuantifierScope();
       const body = parser.parseExpression(terminator);
+      parser.exitQuantifierScope();
       if (!parser.match(')')) return null;
       return [kind, condition, missingIfEmpty(body)] as Expression;
     }

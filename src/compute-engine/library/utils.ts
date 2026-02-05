@@ -1,8 +1,36 @@
-import { checkType } from '../boxed-expression/validate';
 import type { BoxedExpression, ComputeEngine, Scope } from '../global-types';
 
 import { MAX_ITERATION } from '../numerics/numeric';
 import { fromRange, reduceCollection } from './collections';
+import { extractFiniteDomainWithReason } from './logic-analysis';
+
+/**
+ * EL-4: Convert known infinite integer sets to their equivalent Limits bounds.
+ * Returns undefined if the set cannot be converted to a Limits form.
+ *
+ * Mappings:
+ * - NonNegativeIntegers (ℕ₀) → [0, ∞)
+ * - PositiveIntegers (ℤ⁺) → [1, ∞)
+ * - NegativeIntegers (ℤ⁻) → Not supported (would need negative direction)
+ * - Integers (ℤ) → Not supported (bidirectional)
+ * - Other sets (Reals, Complexes, etc.) → Not supported (non-integer)
+ */
+export function convertInfiniteSetToLimits(
+  domainSymbol: string
+): { lower: number; upper: number; isFinite: false } | undefined {
+  switch (domainSymbol) {
+    case 'NonNegativeIntegers':
+      // ℕ₀ = {0, 1, 2, 3, ...}
+      return { lower: 0, upper: MAX_ITERATION, isFinite: false };
+    case 'PositiveIntegers':
+      // ℤ⁺ = {1, 2, 3, ...}
+      return { lower: 1, upper: 1 + MAX_ITERATION, isFinite: false };
+    default:
+      // NegativeIntegers, Integers, Reals, Complexes, etc. cannot be
+      // converted to a simple forward iteration
+      return undefined;
+  }
+}
 
 export type IndexingSet = {
   index: string | undefined;
@@ -212,8 +240,6 @@ export function canonicalLimits(
     if (index.operator === 'Hold') index = index.op1;
 
     if (!index.symbol) index = ce.typeError('symbol', index.type, index);
-    if (lower.symbol !== 'Nothing') lower = checkType(ce, lower, 'number');
-    if (upper.symbol !== 'Nothing') upper = checkType(ce, upper, 'number');
 
     return ce._fn('Limits', [index, lower, upper]);
   }
@@ -226,6 +252,8 @@ export function canonicalLimits(
  * - `lower` (a number), `Nothing` if none is present
  * - `upper` (a number), `Nothing` if none is present
  *
+ * Or, for Element expressions, preserve them in canonical form.
+ *
  * Assume we are in the context of a big operator
  * (i.e. `pushScope()` has been called)
  */
@@ -236,6 +264,25 @@ export function canonicalIndexingSet(
   let index: BoxedExpression;
   let upper: BoxedExpression | null = null;
   let lower: BoxedExpression | null = null;
+
+  // Handle Element expressions - preserve them in canonical form
+  // e.g., ["Element", "n", ["Set", 1, 2, 3]]
+  // or with condition: ["Element", "n", ["Set", 1, 2, 3], ["Greater", "n", 0]]
+  if (expr.operator === 'Element') {
+    const indexExpr = expr.op1;
+    const collection = expr.op2;
+    const condition = expr.op3; // Optional condition (EL-3)
+    if (!indexExpr?.symbol) return undefined;
+    if (indexExpr.symbol !== 'Nothing') ce.declare(indexExpr.symbol, 'integer');
+    if (condition) {
+      return ce.function('Element', [
+        indexExpr.canonical,
+        collection.canonical,
+        condition.canonical,
+      ]);
+    }
+    return ce.function('Element', [indexExpr.canonical, collection.canonical]);
+  }
 
   // If this is already a canonical Limits expression, return it (after
   // canonicalizing its operands) so re-canonicalization paths (like `subs`)
@@ -310,22 +357,42 @@ export function canonicalBigop(
 }
 
 /**
+ * A special symbol used to signal that a BigOp could not be evaluated
+ * because the domain is non-enumerable (e.g., infinite set, unknown symbol).
+ * When this is returned, the Sum/Product should keep the expression symbolic
+ * rather than returning NaN.
+ */
+export const NON_ENUMERABLE_DOMAIN = Symbol('non-enumerable-domain');
+
+/**
+ * Result type for reduceBigOp that includes reason for failure
+ */
+export type BigOpResult<T> =
+  | { status: 'success'; value: T }
+  | { status: 'non-enumerable'; reason: string; domain?: BoxedExpression }
+  | { status: 'error'; reason: string };
+
+/**
  * Process an expression of the form
  * - ['Operator', body, ['Tuple', index1, lower, upper]]
  * - ['Operator', body, ['Tuple', index1, lower, upper], ['Tuple', index2, lower, upper], ...]
+ * - ['Operator', body, ['Element', index, collection]]
  * - ['Operator', body]
  * - ['Operator', collection]
  *
  * `fn()` is the processing done on each element
  * Apply the function `fn` to the body of a big operator, according to the
  * indexing sets.
+ *
+ * Returns either the reduced value, or `typeof NON_ENUMERABLE_DOMAIN` if the
+ * domain cannot be enumerated (in which case the expression should remain symbolic).
  */
 export function* reduceBigOp<T>(
   body: BoxedExpression,
   indexes: ReadonlyArray<BoxedExpression>,
   fn: (acc: T, x: BoxedExpression) => T | null,
   initial: T
-): Generator<T | undefined> {
+): Generator<T | typeof NON_ENUMERABLE_DOMAIN | undefined> {
   // If the body is a collection, reduce it
   // i.e. Sum({1, 2, 3}) = 6
   if (body.isCollection)
@@ -335,12 +402,54 @@ export function* reduceBigOp<T>(
   // i.e. Sum(3) = 3
   if (indexes.length === 0) return fn(initial, body) ?? undefined;
 
-  //
-  // We have one or more indexing sets, i.e. `["Tuple", index, lower, upper]`
-  // Create a cartesian product of the indexing sets.
-  //
   const ce = body.engine;
 
+  // Check for Element-based indexing sets
+  const elementSets = indexes.filter((x) => x.operator === 'Element');
+  if (elementSets.length > 0) {
+    // Handle Element-based indexing sets using extractFiniteDomainWithReason
+    // Use the internal generator that returns detailed results
+    const gen = reduceElementIndexingSets(body, indexes, fn, initial, true);
+
+    // Properly iterate the generator to capture both yielded values and the return value
+    let iterResult = gen.next();
+    while (!iterResult.done) {
+      const result = iterResult.value;
+      // Yield intermediate results for progress tracking (skip object results)
+      if (result !== undefined && typeof result !== 'object') {
+        yield result;
+      }
+      iterResult = gen.next();
+    }
+
+    // The final return value is in iterResult.value when done is true
+    const finalResult = iterResult.value;
+
+    // Check the final result type
+    if (
+      finalResult &&
+      typeof finalResult === 'object' &&
+      'status' in finalResult
+    ) {
+      const typedResult = finalResult as ReduceElementResult<T>;
+      if (typedResult.status === 'success') {
+        return typedResult.value;
+      }
+      if (typedResult.status === 'non-enumerable') {
+        // Signal that the domain is non-enumerable
+        return NON_ENUMERABLE_DOMAIN;
+      }
+      // Error case - return undefined (will become NaN)
+      return undefined;
+    }
+
+    return finalResult as T | undefined;
+  }
+
+  //
+  // We have one or more Limits indexing sets, i.e. `["Limits", index, lower, upper]`
+  // Create a cartesian product of the indexing sets.
+  //
   const indexingSets = normalizeIndexingSets(indexes);
 
   // @todo: special case when there is only one index
@@ -360,5 +469,151 @@ export function* reduceBigOp<T>(
     if (result === undefined) break;
   }
 
+  return result ?? undefined;
+}
+
+/**
+ * Result type for reduceElementIndexingSets to distinguish between
+ * successful evaluation, non-enumerable domains (keep symbolic), and errors.
+ */
+export type ReduceElementResult<T> =
+  | { status: 'success'; value: T }
+  | { status: 'non-enumerable'; reason: string; domain?: BoxedExpression }
+  | { status: 'error'; reason: string };
+
+/**
+ * Handle Element-based indexing sets by extracting finite domains
+ * and iterating over their values.
+ *
+ * Returns a detailed result to distinguish between:
+ * - Success: domain was enumerated and reduced
+ * - Non-enumerable: domain is valid but cannot be enumerated (keep expression symbolic)
+ * - Error: invalid indexing expression
+ */
+function* reduceElementIndexingSets<T>(
+  body: BoxedExpression,
+  indexes: ReadonlyArray<BoxedExpression>,
+  fn: (acc: T, x: BoxedExpression) => T | null,
+  initial: T,
+  returnReason = false
+): Generator<T | ReduceElementResult<T> | undefined> {
+  const ce = body.engine;
+
+  // Separate Element and Limits indexing sets
+  const elementDomains: Array<{ variable: string; values: BoxedExpression[] }> =
+    [];
+  const limitsSets: IndexingSet[] = [];
+
+  for (const idx of indexes) {
+    if (idx.operator === 'Element') {
+      const domainResult = extractFiniteDomainWithReason(idx, ce);
+
+      if (domainResult.status === 'error') {
+        // Invalid indexing expression - return error
+        if (returnReason) {
+          return {
+            status: 'error',
+            reason: domainResult.reason,
+          } as ReduceElementResult<T>;
+        }
+        return undefined;
+      }
+
+      if (domainResult.status === 'non-enumerable') {
+        // EL-4: Check if this is a known infinite integer set that can be
+        // converted to Limits form for iteration
+        if (
+          domainResult.reason === 'infinite-domain' &&
+          domainResult.domain?.symbol
+        ) {
+          const limits = convertInfiniteSetToLimits(domainResult.domain.symbol);
+          if (limits) {
+            // Convert to Limits and continue with iteration
+            limitsSets.push({
+              index: domainResult.variable,
+              ...limits,
+            });
+            continue; // Process next index, don't return early
+          }
+        }
+
+        // Domain exists but cannot be enumerated - keep expression symbolic
+        if (returnReason) {
+          return {
+            status: 'non-enumerable',
+            reason: domainResult.reason,
+            domain: domainResult.domain,
+          } as ReduceElementResult<T>;
+        }
+        return undefined;
+      }
+
+      // Success - domain was extracted
+      elementDomains.push({
+        variable: domainResult.variable,
+        values: domainResult.values,
+      });
+    } else {
+      limitsSets.push(normalizeIndexingSet(idx));
+    }
+  }
+
+  // If we have mixed Element and Limits sets, we need to handle both
+  if (limitsSets.length > 0) {
+    // Mixed case: combine Element domains with Limits ranges
+    // Convert Limits to a similar format
+    for (const limits of limitsSets) {
+      const values: BoxedExpression[] = [];
+      for (let i = limits.lower; i <= limits.upper; i++) {
+        values.push(ce.number(i));
+      }
+      elementDomains.push({ variable: limits.index!, values });
+    }
+  }
+
+  // Generate Cartesian product indices
+  const indices = elementDomains.map(() => 0);
+  const lengths = elementDomains.map((d) => d.values.length);
+
+  // Check for empty domains
+  if (lengths.some((l) => l === 0)) {
+    if (returnReason) {
+      return { status: 'success', value: initial } as ReduceElementResult<T>;
+    }
+    return initial;
+  }
+
+  let result: T | undefined = initial;
+  let counter = 0;
+
+  while (true) {
+    // Apply current combination of assignments
+    for (let i = 0; i < elementDomains.length; i++) {
+      ce.assign(
+        elementDomains[i].variable,
+        elementDomains[i].values[indices[i]]
+      );
+    }
+
+    // Evaluate and accumulate
+    result = fn(result, body) ?? undefined;
+    counter++;
+    if (counter % 1000 === 0) yield result;
+    if (result === undefined) break;
+
+    // Move to next combination
+    let dim = elementDomains.length - 1;
+    while (dim >= 0) {
+      indices[dim]++;
+      if (indices[dim] < lengths[dim]) break;
+      indices[dim] = 0;
+      dim--;
+    }
+    if (dim < 0) break; // Exhausted all combinations
+  }
+
+  if (returnReason) {
+    return { status: 'success', value: result as T } as ReduceElementResult<T>;
+  }
   return result ?? undefined;
 }

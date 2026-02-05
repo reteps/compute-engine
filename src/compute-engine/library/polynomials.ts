@@ -1,6 +1,13 @@
-import { factor, together } from '../boxed-expression/factor';
+import { factor, factorPolynomial, together } from '../boxed-expression/factor';
 import { distribute } from '../symbolic/distribute';
 import { expand, expandAll } from '../boxed-expression/expand';
+import {
+  polynomialDegree,
+  getPolynomialCoefficients,
+  polynomialDivide,
+  polynomialGCD,
+  cancelCommonFactors,
+} from '../boxed-expression/polynomials';
 import type { SymbolDefinitions } from '../global-types';
 
 export const POLYNOMIALS_LIBRARY: SymbolDefinitions[] = [
@@ -21,12 +28,25 @@ export const POLYNOMIALS_LIBRARY: SymbolDefinitions[] = [
     },
 
     Factor: {
-      // @todo: extend to factor over the integers: return a ['Multiply', ['Power', a, b], ...]
       description:
-        'Factors an algebraic expression into a product of irreducible factors',
+        'Factor a polynomial expression into a product of irreducible factors. ' +
+        'Supports perfect square trinomials, difference of squares, and quadratic factoring with rational roots. ' +
+        'Example: Factor(x² + 5x + 6) → (x+2)(x+3), Factor(x² + 2x + 1) → (x+1)²',
       lazy: true,
-      signature: '(value)-> value',
-      evaluate: ([x]) => factor(x.canonical) ?? x.canonical,
+      signature: '(value, symbol?) -> value',
+      evaluate: ([x, varExpr]) => {
+        if (!x) return x;
+
+        // If variable is provided, use polynomial factoring with that variable
+        if (varExpr) {
+          const variable = varExpr.canonical.symbol;
+          if (!variable) return x.canonical;
+          return factorPolynomial(x.canonical, variable);
+        }
+
+        // Otherwise, try polynomial factoring without specific variable
+        return factorPolynomial(x.canonical);
+      },
     },
 
     Together: {
@@ -41,6 +61,103 @@ export const POLYNOMIALS_LIBRARY: SymbolDefinitions[] = [
       lazy: true,
       signature: '(value)-> value',
       evaluate: ([x]) => (!x ? x : distribute(x.canonical)),
+    },
+
+    PolynomialDegree: {
+      description:
+        'Return the degree of a polynomial with respect to a variable. ' +
+        'Example: PolynomialDegree(x³ + 2x + 1, x) → 3',
+      lazy: true,
+      signature: '(value, symbol) -> integer',
+      evaluate: ([poly, varExpr]) => {
+        if (!poly || !varExpr) return undefined;
+        const variable = varExpr.canonical.symbol;
+        if (!variable) return undefined;
+        const deg = polynomialDegree(poly.canonical, variable);
+        return deg >= 0 ? poly.engine.number(deg) : undefined;
+      },
+    },
+
+    CoefficientList: {
+      description:
+        'Return the list of coefficients of a polynomial, from lowest to highest degree. ' +
+        'Example: CoefficientList(x³ + 2x + 1, x) → [1, 2, 0, 1]',
+      lazy: true,
+      signature: '(value, symbol) -> list<value>',
+      evaluate: ([poly, varExpr]) => {
+        if (!poly || !varExpr) return undefined;
+        const variable = varExpr.canonical.symbol;
+        if (!variable) return undefined;
+        const coeffs = getPolynomialCoefficients(poly.canonical, variable);
+        if (!coeffs) return undefined;
+        return poly.engine.box(['List', ...coeffs]);
+      },
+    },
+
+    PolynomialQuotient: {
+      description:
+        'Return the quotient of polynomial division of dividend by divisor. ' +
+        'Example: PolynomialQuotient(x³ - 1, x - 1, x) → x² + x + 1',
+      lazy: true,
+      signature: '(dividend: value, divisor: value, variable: symbol) -> value',
+      evaluate: ([dividend, divisor, varExpr]) => {
+        if (!dividend || !divisor || !varExpr) return undefined;
+        const variable = varExpr.canonical.symbol;
+        if (!variable) return undefined;
+        const result = polynomialDivide(
+          dividend.canonical,
+          divisor.canonical,
+          variable
+        );
+        return result?.[0];
+      },
+    },
+
+    PolynomialRemainder: {
+      description:
+        'Return the remainder of polynomial division of dividend by divisor. ' +
+        'Example: PolynomialRemainder(x³ + 2x + 1, x + 1, x) → -2',
+      lazy: true,
+      signature: '(dividend: value, divisor: value, variable: symbol) -> value',
+      evaluate: ([dividend, divisor, varExpr]) => {
+        if (!dividend || !divisor || !varExpr) return undefined;
+        const variable = varExpr.canonical.symbol;
+        if (!variable) return undefined;
+        const result = polynomialDivide(
+          dividend.canonical,
+          divisor.canonical,
+          variable
+        );
+        return result?.[1];
+      },
+    },
+
+    PolynomialGCD: {
+      description:
+        'Return the greatest common divisor of two polynomials. ' +
+        'Example: PolynomialGCD(x² - 1, x - 1, x) → x - 1',
+      lazy: true,
+      signature: '(a: value, b: value, variable: symbol) -> value',
+      evaluate: ([a, b, varExpr]) => {
+        if (!a || !b || !varExpr) return undefined;
+        const variable = varExpr.canonical.symbol;
+        if (!variable) return undefined;
+        return polynomialGCD(a.canonical, b.canonical, variable);
+      },
+    },
+
+    Cancel: {
+      description:
+        'Cancel common polynomial factors in the numerator and denominator of a rational expression. ' +
+        'Example: Cancel((x² - 1)/(x - 1), x) → x + 1',
+      lazy: true,
+      signature: '(value, symbol) -> value',
+      evaluate: ([expr, varExpr]) => {
+        if (!expr || !varExpr) return undefined;
+        const variable = varExpr.canonical.symbol;
+        if (!variable) return undefined;
+        return cancelCommonFactors(expr.canonical, variable);
+      },
     },
   },
 ];

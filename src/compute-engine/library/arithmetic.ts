@@ -50,7 +50,7 @@ import {
   mulN,
   canonicalDivide,
 } from '../boxed-expression/arithmetic-mul-div';
-import { canonicalBigop, reduceBigOp } from './utils';
+import { canonicalBigop, reduceBigOp, NON_ENUMERABLE_DOMAIN } from './utils';
 import {
   canonicalPower,
   canonicalRoot,
@@ -184,7 +184,8 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
 
       lazy: true,
 
-      signature: '(number+) -> number',
+      // Accept numbers, vectors, and matrices for element-wise addition
+      signature: '(value+) -> value',
       type: addType,
 
       sgn: (ops) => {
@@ -212,7 +213,7 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
       description: 'Rounds a number up to the next largest integer',
       complexity: 1250,
       broadcastable: true,
-      signature: '(real) -> integer',
+      signature: '(number) -> integer',
       sgn: ([x]) => {
         if (x.isLessEqual(-1)) return 'negative';
         if (x.isPositive) return 'positive';
@@ -362,6 +363,9 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
       evaluate: ([x]) => {
         const ce = x.engine;
 
+        // If argument is symbolic (not a number literal), keep unevaluated
+        if (!x.isNumberLiteral) return undefined;
+
         // Is the argument a complex number?
         if (x.im !== 0 && x.im !== undefined)
           return ce.number(gammaComplex(ce.complex(x.re, x.im).add(1)));
@@ -385,6 +389,9 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
       },
       evaluateAsync: async ([x], { signal }) => {
         const ce = x.engine;
+
+        // If argument is symbolic (not a number literal), keep unevaluated
+        if (!x.isNumberLiteral) return undefined;
 
         // Is the argument a complex number?
         if (x.im !== 0 && x.im !== undefined)
@@ -495,6 +502,139 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
               (x) => lngammaComplex(x)
             )
           : undefined,
+    },
+
+    // Digamma function ψ(x) = d/dx ln(Γ(x)) = Γ'(x)/Γ(x)
+    // Also known as the psi function
+    Digamma: {
+      description:
+        'Digamma function, the logarithmic derivative of the gamma function',
+      wikidata: 'Q1142755',
+      complexity: 8200,
+      broadcastable: true,
+      signature: '(number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Trigamma function ψ₁(x) = d/dx ψ(x) = d²/dx² ln(Γ(x))
+    // The derivative of the digamma function
+    Trigamma: {
+      description: 'Trigamma function, the derivative of the digamma function',
+      wikidata: 'Q2371722',
+      complexity: 8400,
+      broadcastable: true,
+      signature: '(number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // PolyGamma function ψₙ(x) = dⁿ/dxⁿ ψ(x)
+    // The n-th derivative of the digamma function
+    // PolyGamma(0, x) = Digamma(x), PolyGamma(1, x) = Trigamma(x)
+    PolyGamma: {
+      description:
+        'Polygamma function, the n-th derivative of the digamma function',
+      wikidata: 'Q1817679',
+      complexity: 8500,
+      broadcastable: true,
+      signature: '(order: integer, number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Riemann zeta function ζ(s) = Σ_{n=1}^∞ 1/n^s
+    // Converges for Re(s) > 1, analytically continued elsewhere
+    Zeta: {
+      description: 'Riemann zeta function',
+      wikidata: 'Q187235',
+      complexity: 8500,
+      broadcastable: true,
+      signature: '(number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Beta function B(a,b) = Γ(a)Γ(b)/Γ(a+b) = ∫₀¹ t^(a-1)(1-t)^(b-1) dt
+    Beta: {
+      description: 'Euler beta function',
+      wikidata: 'Q189062',
+      complexity: 8200,
+      broadcastable: true,
+      signature: '(number, number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Lambert W function: W(x)·e^(W(x)) = x
+    // Also known as the product logarithm or omega function
+    LambertW: {
+      description: 'Lambert W function (product logarithm)',
+      wikidata: 'Q429963',
+      complexity: 8300,
+      broadcastable: true,
+      signature: '(number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Bessel function of the first kind J_n(x)
+    // Solution to Bessel's differential equation that is finite at the origin
+    BesselJ: {
+      description: 'Bessel function of the first kind',
+      wikidata: 'Q627488',
+      complexity: 8500,
+      broadcastable: true,
+      signature: '(order: number, number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Bessel function of the second kind Y_n(x)
+    // Also known as Neumann function or Weber function
+    BesselY: {
+      description: 'Bessel function of the second kind (Neumann function)',
+      wikidata: 'Q627488',
+      complexity: 8500,
+      broadcastable: true,
+      signature: '(order: number, number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Modified Bessel function of the first kind I_n(x)
+    BesselI: {
+      description: 'Modified Bessel function of the first kind',
+      wikidata: 'Q627488',
+      complexity: 8500,
+      broadcastable: true,
+      signature: '(order: number, number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Modified Bessel function of the second kind K_n(x)
+    // Also known as Macdonald function
+    BesselK: {
+      description:
+        'Modified Bessel function of the second kind (Macdonald function)',
+      wikidata: 'Q627488',
+      complexity: 8500,
+      broadcastable: true,
+      signature: '(order: number, number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Airy function of the first kind Ai(x)
+    // Solution to Airy differential equation y'' - xy = 0
+    AiryAi: {
+      description: 'Airy function of the first kind',
+      wikidata: 'Q403629',
+      complexity: 8400,
+      broadcastable: true,
+      signature: '(number) -> number',
+      // Numerical evaluation not yet implemented
+    },
+
+    // Airy function of the second kind Bi(x)
+    AiryBi: {
+      description: 'Airy function of the second kind',
+      wikidata: 'Q403629',
+      complexity: 8400,
+      broadcastable: true,
+      signature: '(number) -> number',
+      // Numerical evaluation not yet implemented
     },
 
     Ln: {
@@ -1475,41 +1615,41 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
         canonicalBigop('Product', body, bounds, scope),
 
       evaluate: (ops, options) => {
-        const fn = (acc, x) => {
-          x = x.evaluate(options);
-          return x.isNumberLiteral ? acc.mul(x.numericValue!) : null;
-        };
-
+        const ce = options.engine;
         const result = run(
           reduceBigOp(
             ops[0],
             ops.slice(1),
-            fn,
-            options.engine._numericValue(1)
+            (acc: BoxedExpression, x) => acc.mul(x.evaluate(options)),
+            ce.One
           ),
-          options.engine._timeRemaining
+          ce._timeRemaining
         );
-        return options.engine.number(result ?? NaN);
+        // If domain is non-enumerable, keep expression unevaluated (symbolic)
+        if (result === NON_ENUMERABLE_DOMAIN) {
+          return undefined; // Return undefined to keep expression symbolic
+        }
+        // Evaluate the accumulated result to combine numeric factors
+        return result?.evaluate() ?? ce.NaN;
       },
 
       evaluateAsync: async (ops, options) => {
-        const fn = (acc, x) => {
-          x = x.evaluate(options);
-          if (!x.isNumberLiteral) return null;
-          return acc.mul(x.numericValue!);
-        };
-
+        const ce = options.engine;
         const result = await runAsync(
           reduceBigOp(
             ops[0],
             ops.slice(1),
-            fn,
-            options.engine._numericValue(1)
+            (acc: BoxedExpression, x) => acc.mul(x.evaluate(options)),
+            ce.One
           ),
-          options.engine._timeRemaining,
+          ce._timeRemaining,
           options.signal
         );
-        return options.engine.number(result ?? NaN);
+        // If domain is non-enumerable, keep expression unevaluated (symbolic)
+        if (result === NON_ENUMERABLE_DOMAIN) {
+          return undefined; // Return undefined to keep expression symbolic
+        }
+        return result?.evaluate() ?? ce.NaN;
       },
     },
 
@@ -1526,39 +1666,42 @@ export const ARITHMETIC_LIBRARY: SymbolDefinitions[] = [
       canonical: ([body, ...bounds], { scope }) =>
         canonicalBigop('Sum', body, bounds, scope),
 
-      evaluate: ([fn, ...indexes], { engine }) =>
-        engine.number(
-          run(
-            reduceBigOp(
-              fn,
-              indexes,
-              (acc, x) => {
-                x = x.evaluate();
-                return x.isNumberLiteral ? acc.add(x.numericValue!) : null;
-              },
-              engine._numericValue(0)
-            ),
-            engine._timeRemaining
-          )
-        ),
+      evaluate: ([body, ...indexes], { engine }) => {
+        const result = run(
+          reduceBigOp(
+            body,
+            indexes,
+            (acc: BoxedExpression, x) => acc.add(x.evaluate()),
+            engine.Zero
+          ),
+          engine._timeRemaining
+        );
+        // If domain is non-enumerable, keep expression unevaluated (symbolic)
+        if (result === NON_ENUMERABLE_DOMAIN) {
+          return undefined; // Return undefined to keep expression symbolic
+        }
+        // Evaluate the accumulated result to combine numeric terms
+        // e.g., 3x + 1 + 2 + 3 → 3x + 6
+        return result?.evaluate() ?? engine.NaN;
+      },
 
-      evaluateAsync: async (xs, { engine, signal }) =>
-        engine.number(
-          await runAsync(
-            reduceBigOp(
-              xs[0],
-              xs.slice(1),
-              (acc, x) => {
-                x = x.evaluate();
-                if (!x.isNumberLiteral) return null;
-                return acc.add(x.numericValue!);
-              },
-              engine._numericValue(0)
-            ),
-            engine._timeRemaining,
-            signal
-          )
-        ),
+      evaluateAsync: async (xs, { engine, signal }) => {
+        const result = await runAsync(
+          reduceBigOp(
+            xs[0],
+            xs.slice(1),
+            (acc: BoxedExpression, x) => acc.add(x.evaluate()),
+            engine.Zero
+          ),
+          engine._timeRemaining,
+          signal
+        );
+        // If domain is non-enumerable, keep expression unevaluated (symbolic)
+        if (result === NON_ENUMERABLE_DOMAIN) {
+          return undefined; // Return undefined to keep expression symbolic
+        }
+        return result?.evaluate() ?? engine.NaN;
+      },
     },
   },
 ];

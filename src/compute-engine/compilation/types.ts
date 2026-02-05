@@ -88,6 +88,68 @@ export interface LanguageTarget {
  * Options for compilation
  */
 export interface CompilationOptions {
+  /**
+   * Target language for compilation.
+   *
+   * Built-in targets:
+   * - `'javascript'` (default) - Compile to JavaScript
+   * - `'glsl'` - Compile to GLSL (OpenGL Shading Language)
+   *
+   * Custom targets can be registered using `ce.registerCompilationTarget()`.
+   *
+   * @example
+   * ```typescript
+   * // Compile to GLSL
+   * const glslCode = expr.compile({ to: 'glsl' });
+   *
+   * // Compile to custom target
+   * ce.registerCompilationTarget('python', new PythonTarget());
+   * const pythonCode = expr.compile({ to: 'python' });
+   * ```
+   */
+  to?: string;
+
+  /**
+   * Direct compilation target override.
+   *
+   * When provided, this takes precedence over the `to` option.
+   * Useful for one-off custom targets without registration.
+   *
+   * @example
+   * ```typescript
+   * const customTarget: CompileTarget = {
+   *   language: 'custom',
+   *   operators: (op) => ...,
+   *   functions: (id) => ...,
+   *   // ... other methods
+   * };
+   *
+   * const code = expr.compile({ target: customTarget });
+   * ```
+   */
+  target?: CompileTarget;
+
+  /**
+   * Custom operator mappings. Can be:
+   * - A partial object mapping operator names to [operator, precedence] tuples
+   * - A function that returns the operator mapping for a given symbol
+   *
+   * When an operator is overridden, it will be compiled using the specified
+   * string and precedence instead of the default for the target language.
+   *
+   * @example
+   * ```typescript
+   * // Override operators as object
+   * { operators: { Add: ['add', 11], Multiply: ['mul', 12] } }
+   *
+   * // Override operators as function
+   * { operators: (op) => op === 'Add' ? ['add', 11] : undefined }
+   * ```
+   */
+  operators?:
+    | Partial<CompiledOperators>
+    | ((op: MathJsonSymbol) => [op: string, prec: number] | undefined);
+
   /** Custom function implementations */
   functions?: Record<MathJsonSymbol, TargetSource | Function>;
 

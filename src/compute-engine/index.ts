@@ -66,6 +66,11 @@ import type {
   ComputeEngine as IComputeEngine,
   BoxedDefinition,
   SymbolDefinition,
+  SequenceDefinition,
+  SequenceStatus,
+  SequenceInfo,
+  OEISSequenceInfo,
+  OEISOptions,
 } from './global-types';
 
 import type {
@@ -107,6 +112,11 @@ import {
   updateDef,
 } from './boxed-expression/utils';
 import { boxRules } from './boxed-expression/rules';
+import {
+  validatePattern,
+  isWildcard,
+  wildcardName,
+} from './boxed-expression/boxed-patterns';
 import { BoxedString } from './boxed-expression/boxed-string';
 import { BoxedNumber, canonicalNumber } from './boxed-expression/boxed-number';
 import { _BoxedValueDefinition } from './boxed-expression/boxed-value-definition';
@@ -118,6 +128,13 @@ import {
   HARMONIZATION_RULES,
   UNIVARIATE_ROOTS,
 } from './boxed-expression/solve';
+import {
+  factor,
+  factorPerfectSquare,
+  factorDifferenceOfSquares,
+  factorQuadratic,
+  factorPolynomial,
+} from './boxed-expression/factor';
 
 // To avoid circular dependencies, serializeToJson is forward declared. Type
 // to import it.
@@ -127,9 +144,61 @@ import { SIMPLIFY_RULES } from './symbolic/simplify-rules';
 import { bigint } from './numerics/bigint';
 import { canonicalFunctionLiteral, lookup } from './function-utils';
 
-import { assume } from './assume';
+import { assume, getInequalityBoundsFromAssumptions } from './assume';
+import {
+  createSequenceHandler,
+  validateSequenceDefinition,
+  getSequenceStatus as getSequenceStatusImpl,
+  getSequenceInfo as getSequenceInfoImpl,
+  listSequences as listSequencesImpl,
+  isSequence as isSequenceImpl,
+  clearSequenceCache as clearSequenceCacheImpl,
+  getSequenceCache as getSequenceCacheImpl,
+  generateSequenceTerms as generateSequenceTermsImpl,
+} from './sequence';
+
+import {
+  lookupSequence as lookupSequenceImpl,
+  checkSequence as checkSequenceImpl,
+} from './oeis';
 
 export * from './global-types';
+
+export { validatePattern };
+
+// Export polynomial factoring functions for advanced users
+export {
+  factor,
+  factorPerfectSquare,
+  factorDifferenceOfSquares,
+  factorQuadratic,
+  factorPolynomial,
+};
+
+// Export compilation types and classes for advanced users
+export type {
+  CompileTarget,
+  CompiledOperators,
+  CompiledFunctions,
+  CompilationOptions,
+  CompiledExecutable,
+  LanguageTarget,
+  TargetSource,
+  CompiledFunction,
+} from './compilation/types';
+
+export { JavaScriptTarget } from './compilation/javascript-target';
+export { GLSLTarget } from './compilation/glsl-target';
+export { IntervalJavaScriptTarget } from './compilation/interval-javascript-target';
+export { IntervalGLSLTarget } from './compilation/interval-glsl-target';
+export { BaseCompiler } from './compilation/base-compiler';
+
+// Import for internal use
+import type { LanguageTarget } from './compilation/types';
+import { JavaScriptTarget as _JavaScriptTarget } from './compilation/javascript-target';
+import { GLSLTarget as _GLSLTarget } from './compilation/glsl-target';
+import { IntervalJavaScriptTarget as _IntervalJavaScriptTarget } from './compilation/interval-javascript-target';
+import { IntervalGLSLTarget as _IntervalGLSLTarget } from './compilation/interval-glsl-target';
 
 /**
  *
@@ -241,6 +310,9 @@ export class ComputeEngine implements IComputeEngine {
 
   /** @internal */
   private _cost?: (expr: BoxedExpression) => number;
+
+  /** @internal Registry of compilation targets */
+  private _compilationTargets: Map<string, LanguageTarget> = new Map();
 
   /** @internal */
   private _commonSymbols: { [symbol: string]: null | BoxedExpression } = {
@@ -564,6 +636,15 @@ export class ComputeEngine implements IComputeEngine {
     // this will be the "global" scope
     this.pushScope(undefined, 'global');
 
+    // Register default compilation targets
+    this._compilationTargets.set('javascript', new _JavaScriptTarget());
+    this._compilationTargets.set('glsl', new _GLSLTarget());
+    this._compilationTargets.set(
+      'interval-js',
+      new _IntervalJavaScriptTarget()
+    );
+    this._compilationTargets.set('interval-glsl', new _IntervalGLSLTarget());
+
     hidePrivateProperties(this);
   }
 
@@ -636,6 +717,49 @@ export class ComputeEngine implements IComputeEngine {
     tracker: ConfigurationChangeListener
   ): () => void {
     return this._configurationChangeTracker.listen(tracker);
+  }
+
+  /**
+   * Register a custom compilation target.
+   *
+   * This allows you to compile mathematical expressions to different target
+   * languages beyond the built-in JavaScript and GLSL targets.
+   *
+   * @param name - The name of the target (e.g., 'python', 'wgsl', 'matlab')
+   * @param target - The LanguageTarget implementation
+   *
+   * @example
+   * ```typescript
+   * import { ComputeEngine, GLSLTarget } from '@cortex-js/compute-engine';
+   *
+   * const ce = new ComputeEngine();
+   *
+   * // Register a custom target
+   * class PythonTarget implements LanguageTarget {
+   *   // Implementation...
+   * }
+   *
+   * ce.registerCompilationTarget('python', new PythonTarget());
+   *
+   * // Use the custom target
+   * const expr = ce.parse('x^2 + y^2');
+   * const code = expr.compile({ to: 'python' });
+   * ```
+   */
+  registerCompilationTarget(name: string, target: LanguageTarget): void {
+    this._compilationTargets.set(name, target);
+  }
+
+  /**
+   * Get a registered compilation target by name.
+   *
+   * @param name - The name of the target (e.g., 'javascript', 'glsl')
+   * @returns The LanguageTarget implementation, or undefined if not found
+   *
+   * @internal
+   */
+  _getCompilationTarget(name: string): LanguageTarget | undefined {
+    return this._compilationTargets.get(name);
   }
 
   get precision(): number {
@@ -760,6 +884,39 @@ export class ComputeEngine implements IComputeEngine {
   }
 
   private _recursionLimit: number = 1024;
+
+  /**
+   * Flag to prevent infinite recursion in the verify/ask/equality checking cycle.
+   *
+   * **The Problem:**
+   * When verifying equality predicates, a recursion loop can occur:
+   * 1. `verify(Equal(x, 0))` evaluates the expression
+   * 2. `Equal.evaluate()` calls `eq(x, 0)` to check equality
+   * 3. `eq()` calls `ask(['NotEqual', x, 0])` to check assumptions
+   * 4. `ask()` calls `verify(NotEqual(x, 0))` as a fallback
+   * 5. `verify()` evaluates, calling `eq()` again → infinite loop
+   *
+   * **The Solution:**
+   * - Set `_isVerifying = true` when entering `verify()`
+   * - `ask()` skips the `verify()` fallback when `_isVerifying` is true
+   * - `Equal/NotEqual` evaluate handlers check this flag to preserve 3-valued
+   *   logic in verification mode while still returning False/True in normal mode
+   *
+   * @see verify() in index.ts
+   * @see ask() in index.ts
+   * @see eq() in compare.ts
+   * @see Equal/NotEqual operators in relational-operator.ts
+   */
+  private _isVerifying: boolean = false;
+
+  /**
+   * @internal
+   * Indicates whether we're currently inside a verify() call.
+   * Used to prevent recursion and to enable 3-valued logic in verification mode.
+   */
+  get isVerifying(): boolean {
+    return this._isVerifying;
+  }
 
   get tolerance(): number {
     return this._tolerance;
@@ -1324,6 +1481,26 @@ export class ComputeEngine implements IComputeEngine {
   }
 
   /**
+   * Set a value directly in the current context's values map.
+   * This is used for assumptions so that the value is scoped to the current
+   * evaluation context and is automatically removed when the scope is popped.
+   * @internal
+   */
+  _setCurrentContextValue(
+    id: MathJsonSymbol,
+    value: BoxedExpression | boolean | number | undefined
+  ): void {
+    const l = this._evalContextStack.length - 1;
+    if (l < 0) throw new Error(`No evaluation context`);
+
+    if (typeof value === 'number') value = this.number(value);
+    else if (typeof value === 'boolean') value = value ? this.True : this.False;
+
+    this._evalContextStack[l].values[id] = value;
+    this._generation += 1;
+  }
+
+  /**
    * Declare a symbol in the current lexical scope: specify their type and
    * other attributes, including optionally a value.
    *
@@ -1426,6 +1603,178 @@ export class ComputeEngine implements IComputeEngine {
     }
 
     return this;
+  }
+
+  /**
+   * Declare a sequence with a recurrence relation.
+   *
+   * @example
+   * ```typescript
+   * // Fibonacci sequence
+   * ce.declareSequence('F', {
+   *   base: { 0: 0, 1: 1 },
+   *   recurrence: 'F_{n-1} + F_{n-2}',
+   * });
+   * ce.parse('F_{10}').evaluate();  // → 55
+   * ```
+   */
+  declareSequence(name: string, def: SequenceDefinition): IComputeEngine {
+    // Validate basic requirements (without parsing)
+    if (!def.base || Object.keys(def.base).length === 0) {
+      throw new Error(`Sequence "${name}" requires at least one base case`);
+    }
+    if (!def.recurrence) {
+      throw new Error(`Sequence "${name}" requires a recurrence relation`);
+    }
+
+    // Declare the symbol first with a placeholder handler
+    // This ensures the symbol exists when we parse the recurrence
+    this.declare(name, {
+      subscriptEvaluate: () => undefined,
+    });
+
+    // Now validate and create the actual handler
+    const validation = validateSequenceDefinition(this, name, def);
+    if (!validation.valid) {
+      throw new Error(validation.error);
+    }
+
+    // Create the full subscriptEvaluate handler
+    const handler = createSequenceHandler(this, name, def);
+
+    // Update the symbol's subscriptEvaluate handler
+    // We need to access the internal definition to update it
+    const boxedDef = this.lookupDefinition(name);
+    if (boxedDef && isValueDef(boxedDef)) {
+      boxedDef.value.subscriptEvaluate = handler;
+    }
+
+    return this;
+  }
+
+  /**
+   * Get the status of a sequence definition.
+   *
+   * @example
+   * ```typescript
+   * ce.parse('F_0 := 0').evaluate();
+   * ce.getSequenceStatus('F');
+   * // → { status: 'pending', hasBase: true, hasRecurrence: false, baseIndices: [0] }
+   * ```
+   */
+  getSequenceStatus(name: string): SequenceStatus {
+    return getSequenceStatusImpl(this, name);
+  }
+
+  /**
+   * Get information about a defined sequence.
+   * Returns `undefined` if the symbol is not a sequence.
+   */
+  getSequence(name: string): SequenceInfo | undefined {
+    return getSequenceInfoImpl(this, name);
+  }
+
+  /**
+   * List all defined sequences.
+   */
+  listSequences(): string[] {
+    return listSequencesImpl(this);
+  }
+
+  /**
+   * Check if a symbol is a defined sequence.
+   */
+  isSequence(name: string): boolean {
+    return isSequenceImpl(this, name);
+  }
+
+  /**
+   * Clear the memoization cache for a sequence.
+   * If no name is provided, clears caches for all sequences.
+   */
+  clearSequenceCache(name?: string): void {
+    clearSequenceCacheImpl(this, name);
+  }
+
+  /**
+   * Get the memoization cache for a sequence.
+   * Returns a Map of index → value, or `undefined` if not a sequence or memoization is disabled.
+   *
+   * For single-index sequences, keys are numbers.
+   * For multi-index sequences, keys are comma-separated strings (e.g., '5,2').
+   */
+  getSequenceCache(
+    name: string
+  ): Map<number | string, BoxedExpression> | undefined {
+    return getSequenceCacheImpl(this, name);
+  }
+
+  /**
+   * Generate a list of sequence terms from start to end (inclusive).
+   *
+   * @param name - The sequence name
+   * @param start - Starting index (inclusive)
+   * @param end - Ending index (inclusive)
+   * @param step - Step size (default: 1)
+   * @returns Array of BoxedExpressions, or undefined if not a sequence
+   *
+   * @example
+   * ```typescript
+   * ce.declareSequence('F', { base: { 0: 0, 1: 1 }, recurrence: 'F_{n-1} + F_{n-2}' });
+   * ce.getSequenceTerms('F', 0, 10);
+   * // → [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
+   * ```
+   */
+  getSequenceTerms(
+    name: string,
+    start: number,
+    end: number,
+    step?: number
+  ): BoxedExpression[] | undefined {
+    return generateSequenceTermsImpl(this, name, start, end, step);
+  }
+
+  /**
+   * Look up sequences in OEIS by their terms.
+   *
+   * @param terms - Array of sequence terms to search for
+   * @param options - Optional configuration (timeout, maxResults)
+   * @returns Promise resolving to array of matching sequences
+   *
+   * @example
+   * ```typescript
+   * const results = await ce.lookupOEIS([0, 1, 1, 2, 3, 5, 8, 13]);
+   * // → [{ id: 'A000045', name: 'Fibonacci numbers', ... }]
+   * ```
+   */
+  lookupOEIS(
+    terms: (number | BoxedExpression)[],
+    options?: OEISOptions
+  ): Promise<OEISSequenceInfo[]> {
+    return lookupSequenceImpl(this, terms, options);
+  }
+
+  /**
+   * Check if a defined sequence matches an OEIS sequence.
+   *
+   * @param name - Name of the defined sequence
+   * @param count - Number of terms to check (default: 10)
+   * @param options - Optional configuration
+   * @returns Promise with match results including OEIS matches and generated terms
+   *
+   * @example
+   * ```typescript
+   * ce.declareSequence('F', { base: { 0: 0, 1: 1 }, recurrence: 'F_{n-1} + F_{n-2}' });
+   * const result = await ce.checkSequenceOEIS('F', 10);
+   * // → { matches: [{ id: 'A000045', name: 'Fibonacci numbers', ... }], terms: [0, 1, 1, ...] }
+   * ```
+   */
+  checkSequenceOEIS(
+    name: string,
+    count?: number,
+    options?: OEISOptions
+  ): Promise<{ matches: OEISSequenceInfo[]; terms: number[] }> {
+    return checkSequenceImpl(this, name, count, options);
   }
 
   /**
@@ -1717,9 +2066,10 @@ export class ComputeEngine implements IComputeEngine {
   /** Create a boxed symbol */
   symbol(
     name: string,
-    options?: { canonical?: CanonicalOptions }
+    options?: { canonical?: CanonicalOptions; metadata?: Metadata }
   ): BoxedExpression {
     const canonical = options?.canonical ?? true;
+    const metadata = options?.metadata;
 
     // Symbols should use the Unicode NFC canonical form
     name = name.normalize();
@@ -1733,7 +2083,7 @@ export class ComputeEngine implements IComputeEngine {
     if (this.strict && !isValidSymbol(name))
       return this.error(['invalid-symbol', validateSymbol(name)], name);
 
-    if (!canonical) return new BoxedSymbol(this, name);
+    if (!canonical) return new BoxedSymbol(this, name, { metadata });
 
     const result = this._commonSymbols[name];
     if (result) return result;
@@ -1744,11 +2094,11 @@ export class ComputeEngine implements IComputeEngine {
     if (isValueDef(def) && def.value.holdUntil === 'never')
       return def.value.value ?? this.Nothing;
 
-    if (def) return new BoxedSymbol(this, name, { def });
+    if (def) return new BoxedSymbol(this, name, { metadata, def });
 
     // There was no definition for this name, so we create a new one
     def = this._declareSymbolValue(name, { type: 'unknown', inferred: true });
-    return new BoxedSymbol(this, name, { def });
+    return new BoxedSymbol(this, name, { metadata, def });
   }
 
   /**
@@ -1928,6 +2278,7 @@ export class ComputeEngine implements IComputeEngine {
 
       repeatingDecimal: 'auto', // auto will accept any notation
 
+      strict: true,
       skipSpace: true,
       parseNumbers: 'auto',
       getSymbolType: (id) => {
@@ -1940,8 +2291,16 @@ export class ComputeEngine implements IComputeEngine {
 
         return BoxedType.unknown;
       },
+      hasSubscriptEvaluate: (id) => {
+        // Check if the symbol has a custom subscript evaluation handler
+        const def = this.lookupDefinition(id);
+        if (isValueDef(def) && def.value.subscriptEvaluate) return true;
+        return false;
+      },
       parseUnexpectedToken: (_lhs, _parser) => null,
       preserveLatex: false,
+      quantifierScope: 'tight',
+      timeDerivativeVariable: 't',
     };
 
     const result = parse(
@@ -1965,11 +2324,178 @@ export class ComputeEngine implements IComputeEngine {
   ask(pattern: BoxedExpression): BoxedSubstitution[] {
     const pat = this.box(pattern, { canonical: false });
     const result: BoxedSubstitution[] = [];
+
+    const patternHasWildcards = (expr: BoxedExpression): boolean => {
+      if (expr.operator?.startsWith('_')) return true;
+      if (isWildcard(expr)) return true;
+      if (expr.ops) return expr.ops.some(patternHasWildcards);
+      return false;
+    };
+
+    const pushResult = (m: BoxedSubstitution) => {
+      const keys = Object.keys(m).sort();
+      for (const prev of result) {
+        const prevKeys = Object.keys(prev).sort();
+        if (prevKeys.length !== keys.length) continue;
+        let same = true;
+        for (let i = 0; i < keys.length; i++) {
+          if (prevKeys[i] !== keys[i]) {
+            same = false;
+            break;
+          }
+          const k = keys[i]!;
+          if (!m[k]!.isSame(prev[k]!)) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return;
+      }
+      result.push(m);
+    };
+
     const assumptions = this.context.assumptions;
-    for (const [assumption, val] of assumptions) {
-      const m = pat.match(assumption);
-      if (m !== null && val === true) result.push(m);
+
+    const candidatesFromAssumptions = (): string[] => {
+      const candidates = new Set<string>();
+      for (const [assumption, val] of assumptions) {
+        if (val !== true) continue;
+        for (const s of assumption.symbols) candidates.add(s);
+      }
+      return [...candidates];
+    };
+
+    const normalizedInequalityPatterns = (
+      expr: BoxedExpression
+    ): Array<{ pattern: BoxedExpression; matchPermutations?: boolean }> => {
+      const op = expr.operator;
+      if (
+        op !== 'Less' &&
+        op !== 'LessEqual' &&
+        op !== 'Greater' &&
+        op !== 'GreaterEqual'
+      )
+        return [{ pattern: expr }];
+
+      const lhs =
+        op === 'Greater' || op === 'GreaterEqual' ? expr.op2 : expr.op1;
+      const rhs =
+        op === 'Greater' || op === 'GreaterEqual' ? expr.op1 : expr.op2;
+      const normalizedOp =
+        op === 'Less' || op === 'Greater' ? 'Less' : 'LessEqual';
+
+      // Normalize to Less/LessEqual with RHS = 0, matching how assumptions are stored:
+      //   Greater(a, b) -> Less(b - a, 0)
+      //   Less(a, b)    -> Less(a - b, 0)
+      const diff = this.box(['Add', lhs, ['Negate', rhs]], {
+        canonical: false,
+      });
+      return [
+        { pattern: expr },
+        // For the normalized form, disable permutations: for commutative
+        // subexpressions (notably Add), allowing permutations can lead to
+        // ambiguous wildcard bindings and duplicate, surprising matches.
+        {
+          pattern: this.box([normalizedOp, diff, 0], { canonical: false }),
+          matchPermutations: false,
+        },
+      ];
+    };
+
+    // B1: Element(x, _T) can be answered from the declared/inferred type of x
+    if (pat.operator === 'Element' && pat.op1?.symbol && isWildcard(pat.op2)) {
+      const typeWildcard = wildcardName(pat.op2);
+      if (typeWildcard && !typeWildcard.startsWith('__')) {
+        const symbolType = this.box(pat.op1.symbol).type;
+        if (!symbolType.isUnknown) {
+          pushResult({
+            [typeWildcard]: this.box(symbolType.toString(), {
+              canonical: false,
+            }),
+          });
+        }
+      }
     }
+
+    // B2: Inequality bound queries, e.g. Greater(x, _k) -> {_k: lowerBound}
+    if (
+      (pat.operator === 'Greater' ||
+        pat.operator === 'GreaterEqual' ||
+        pat.operator === 'Less' ||
+        pat.operator === 'LessEqual') &&
+      isWildcard(pat.op2)
+    ) {
+      const boundWildcard = wildcardName(pat.op2);
+      if (boundWildcard && !boundWildcard.startsWith('__')) {
+        const isLower =
+          pat.operator === 'Greater' || pat.operator === 'GreaterEqual';
+        const isStrict = pat.operator === 'Greater' || pat.operator === 'Less';
+
+        // Symbol on LHS: Greater(x, _k)
+        if (pat.op1?.symbol) {
+          const bounds = getInequalityBoundsFromAssumptions(
+            this,
+            pat.op1.symbol
+          );
+          const bound = isLower ? bounds.lowerBound : bounds.upperBound;
+          const strictOk = isLower ? bounds.lowerStrict : bounds.upperStrict;
+          if (bound !== undefined && (!isStrict || strictOk === true))
+            pushResult({ [boundWildcard]: bound });
+        }
+
+        // Wildcard on LHS: Greater(_x, _k)
+        if (isWildcard(pat.op1)) {
+          const symbolWildcard = wildcardName(pat.op1);
+          if (symbolWildcard && !symbolWildcard.startsWith('__')) {
+            for (const s of candidatesFromAssumptions()) {
+              const bounds = getInequalityBoundsFromAssumptions(this, s);
+              const bound = isLower ? bounds.lowerBound : bounds.upperBound;
+              const strictOk = isLower
+                ? bounds.lowerStrict
+                : bounds.upperStrict;
+              if (bound === undefined || (isStrict && strictOk !== true))
+                continue;
+              pushResult({
+                [symbolWildcard]: this.box(s, { canonical: true }),
+                [boundWildcard]: bound,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    const patternsToTry = normalizedInequalityPatterns(pat);
+    for (const [assumption, val] of assumptions) {
+      if (val !== true) continue;
+      for (const { pattern: p, matchPermutations } of patternsToTry) {
+        const m = assumption.match(p, {
+          useVariations: true,
+          matchPermutations,
+        });
+        if (m !== null) pushResult(m);
+      }
+    }
+
+    // B3: For closed predicates (no wildcards), fall back to verify().
+    // This makes `ask()` useful for "is this known?" queries even when the
+    // fact is not explicitly stored in the assumptions DB (e.g. declarations).
+    //
+    // IMPORTANT: Skip this if we're already inside a verify() call to prevent
+    // infinite recursion. The recursion occurs when:
+    //   verify(Equal(x,0)) → Equal.evaluate() → eq() → ask(NotEqual(x,0)) → verify()
+    // By checking _isVerifying, we break this cycle.
+    if (
+      result.length === 0 &&
+      !patternHasWildcards(pat) &&
+      !this._isVerifying
+    ) {
+      // Use the canonical form so symbol declarations/definitions are visible
+      // to the evaluator.
+      const verified = this.verify(this.box(pattern, { canonical: true }));
+      if (verified === true) pushResult({});
+    }
+
     return result;
   }
 
@@ -1978,9 +2504,60 @@ export class ComputeEngine implements IComputeEngine {
    *
    */
 
-  verify(_query: BoxedExpression): boolean {
-    // @todo
-    return false;
+  verify(query: BoxedExpression): boolean | undefined {
+    // Prevent recursive verify() -> ask() -> verify() loops
+    if (this._isVerifying) return undefined;
+
+    this._isVerifying = true;
+    try {
+      const boxed = isLatexString(query)
+        ? this.parse(query, { canonical: false })
+        : this.box(query, { canonical: false });
+
+      const expr = boxed.evaluate();
+      if (expr.symbol === 'True') return true;
+      if (expr.symbol === 'False') return false;
+
+      const op = expr.operator;
+
+      if (op === 'Not') {
+        const result = this.verify(expr.op1);
+        if (result === undefined) return undefined;
+        return !result;
+      }
+
+      if (op === 'And') {
+        // Kleene 3-valued logic:
+        // - if any operand is false, the result is false
+        // - if all operands are true, the result is true
+        // - otherwise the result is unknown
+        let hasUnknown = false;
+        for (const x of expr.ops ?? []) {
+          const r = this.verify(x);
+          if (r === false) return false;
+          if (r === undefined) hasUnknown = true;
+        }
+        return hasUnknown ? undefined : true;
+      }
+
+      if (op === 'Or') {
+        // Kleene 3-valued logic:
+        // - if any operand is true, the result is true
+        // - if all operands are false, the result is false
+        // - otherwise the result is unknown
+        let hasUnknown = false;
+        for (const x of expr.ops ?? []) {
+          const r = this.verify(x);
+          if (r === true) return true;
+          if (r === undefined) hasUnknown = true;
+        }
+        return hasUnknown ? undefined : false;
+      }
+
+      return undefined;
+    } finally {
+      this._isVerifying = false;
+    }
   }
 
   /**
@@ -2054,6 +2631,14 @@ export class ComputeEngine implements IComputeEngine {
       for (const [assumption, _val] of this.context.assumptions) {
         if (assumption.has(symbol)) this.context.assumptions.delete(assumption);
       }
+
+      // Also clear any values that were set for this symbol in the evaluation context.
+      // Values can be stored in any frame of the context stack, so we need to check all of them.
+      for (const ctx of this._evalContextStack) {
+        if (symbol in ctx.values) {
+          delete ctx.values[symbol];
+        }
+      }
     }
     // The removed assumptions could affect existing expressions
     this._generation += 1;
@@ -2071,10 +2656,12 @@ function assignValueAsValue(
   if (typeof value === 'number' || typeof value === 'bigint')
     return ce.number(value);
   const expr = ce.box(value);
-  if (expr.unknowns.length > 0) {
-    // If the expression has unknowns, we cannot assign it as a value
-    // (it would be a function)
-    // E.g. ["Add", "_", 1]
+  // Explicit function expressions should always be treated as operator definitions
+  if (expr.operator === 'Function') return undefined;
+  if (expr.unknowns.some((s) => s.startsWith('_'))) {
+    // If the expression has wildcards, it should be treated as a function
+    // E.g. ["Add", "_", 1] or ["Add", "_x", 1]
+    // Note: Regular unknowns (e.g., "x", "a", "b") are fine in values
     return undefined;
   }
   return expr;
@@ -2093,7 +2680,10 @@ function assignValueAsOperatorDef(
   const body = canonicalFunctionLiteral(ce.box(value));
   if (body === undefined) return undefined;
 
-  return { evaluate: body, signature: 'function' };
+  // Don't set an explicit signature - let it be inferred from the body.
+  // This ensures inferredSignature = true, which allows the return type
+  // to be properly narrowed during type checking (e.g., in Add operands).
+  return { evaluate: body };
 }
 
 function defToString(

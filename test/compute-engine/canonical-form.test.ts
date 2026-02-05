@@ -85,9 +85,8 @@ describe('CANONICAL FORMS', () => {
     expect(check('\\frac{-101}{10^{\\frac{2}{3}}}')).toMatchInlineSnapshot(`
       box       = ["Divide", -101, ["Power", 10, ["Divide", 2, 3]]]
       canonical = ["Divide", -101, ["Power", 10, ["Rational", 2, 3]]]
-      simplify  = -21.75979036932202893
-      eval-auto = -21.75979036932202893
-      eval-mach = -21.759790369322026
+      eval-auto = -101 / 10^(2/3)
+      eval-mach = -101 / 10^(2/3)
       N-auto    = -21.7597903693220255898
       N-mach    = -21.75979036932202
     `);
@@ -248,7 +247,7 @@ describe('CANONICAL FORMS', () => {
     expect(check('2\\frac{x}{a}\\frac{y}{b}')).toMatchInlineSnapshot(`
       box       = ["InvisibleOperator", 2, ["Divide", "x", "a"], ["Divide", "y", "b"]]
       canonical = ["Divide", ["Multiply", 2, "x", "y"], ["Multiply", "a", "b"]]
-      eval-auto = (2x * y) / (a * b)
+      simplify  = (2x * y) / (a * b)
     `);
   });
 
@@ -432,12 +431,9 @@ describe('CANONICAL FORMS', () => {
       // `);
 
       /*
-       * Control
+       * Control: j is declared as a constant with value 0 (see line 286).
+       * Canonicalization maintains the structure; simplification would evaluate to 0.
        */
-      //!@note:
-      //Not currently simplified, despite 'j' being an 'integer'-typed constant, because the base is
-      //a non-canonical function and therefore unbound to a definition; consequently with its 'type'
-      //non-determinable.
       expect(checkPower('{-j/4}^1')).toMatchInlineSnapshot(`
         box        = ["Power", ["Divide", ["Negate", "j"], 4], 1]
         canonForms = ["Power", ["Divide", ["Negate", "j"], 4], 1]

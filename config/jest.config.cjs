@@ -1,8 +1,9 @@
 module.exports = {
   prettierPath: require.resolve('prettier-2'),
-  verbose: true,
+  verbose: false,
   preset: 'ts-jest',
   testEnvironment: 'node',
+  maxWorkers: 6, // Optimized for M3 (8-core: 4P + 4E) based on benchmarking
   collectCoverageFrom: ['src/**/*.ts', '!<rootDir>/node_modules/'],
   coverageReporters: ['lcov'],
   coverageDirectory: '../coverage',
@@ -17,7 +18,7 @@ module.exports = {
     //, '<rootDir>/../src'
   ],
   setupFilesAfterEnv: ['../test/jest-config.ts'],
-  //   reporters: ['jest-silent-reporter'],
+  reporters: ['jest-silent-reporter'],
   transformIgnorePatterns: ['node_modules/(?!(complex-esm)/)'],
   transform: {
     '^.+\\.(ts|js)$': [

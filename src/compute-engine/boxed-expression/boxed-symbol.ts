@@ -55,6 +55,7 @@ import {
   nonNegativeSign,
 } from './sgn';
 import { matchesSymbol } from '../../math-json/utils';
+import { getSignFromAssumptions } from '../assume';
 
 /**
  * ### BoxedSymbol
@@ -259,11 +260,12 @@ export class BoxedSymbol extends _BoxedExpression {
     // Mathematica returns `Log[0]` as `-∞`
     if (this.is(0)) return this.engine.NegativeInfinity;
 
-    if (
-      (!base || base.symbol === 'ExponentialE') &&
-      this.symbol === 'ExponentialE'
-    )
-      return this.engine.One;
+    // ln(e) = 1 (natural log)
+    // ln_c(e) = 1/ln(c) (for other bases)
+    if (this.symbol === 'ExponentialE') {
+      if (!base || base.symbol === 'ExponentialE') return this.engine.One;
+      return this.engine.One.div(base.ln()); // log_c(e) = 1/ln(c)
+    }
 
     if (base) {
       if (base.re === 10) return this.engine._fn('Log', [this]);
@@ -536,9 +538,26 @@ export class BoxedSymbol extends _BoxedExpression {
     return match(this, pattern, options);
   }
 
+  /** The shape of the tensor (dimensions), derived from the type */
+  get shape(): number[] {
+    const t = this.type.type;
+    if (typeof t === 'object' && t.kind === 'list' && t.dimensions)
+      return t.dimensions;
+    return [];
+  }
+
+  /** The rank of the tensor (number of dimensions), derived from the type */
+  get rank(): number {
+    return this.shape.length;
+  }
+
   // The sign of the value of the symbol
   get sgn(): Sign | undefined {
-    return this.value?.sgn;
+    // First check if there's an assigned value
+    if (this.value) return this.value.sgn;
+
+    // Otherwise, check if there are assumptions about this symbol's sign
+    return getSignFromAssumptions(this.engine, this.symbol);
   }
 
   get isOdd(): boolean | undefined {
@@ -657,6 +676,11 @@ export class BoxedSymbol extends _BoxedExpression {
   N(): BoxedExpression {
     const def = this.valueDefinition;
     if (def && def.holdUntil === 'never') return this;
+    // For non-constants, check the evaluation context value first
+    if (def && !def.isConstant) {
+      const contextValue = this.engine._getSymbolValue(this._id);
+      if (contextValue) return contextValue.N();
+    }
     return def?.value?.N() ?? this;
   }
 

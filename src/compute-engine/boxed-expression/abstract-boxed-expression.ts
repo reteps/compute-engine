@@ -31,8 +31,7 @@ import type {
 
 import type { NumericValue } from '../numeric-value/types';
 import type { SmallInteger } from '../numerics/types';
-import { JavaScriptTarget } from '../compilation/javascript-target';
-import { applicableN1 } from '../function-utils';
+// Dynamic import for JavaScriptTarget and applicableN1 to avoid circular dependency
 
 import {
   getApplyFunctionStyle,
@@ -47,9 +46,9 @@ import { serializeLatex } from '../latex-syntax/serializer';
 import type { LatexString, SerializeLatexOptions } from '../latex-syntax/types';
 
 import { toAsciiMath } from './ascii-math';
-import { serializeJson } from './serialize';
+// Dynamic import for serializeJson to avoid circular dependency
 import { cmp, eq, same } from './compare';
-import { expand } from './expand';
+// Dynamic import for expand to avoid circular dependency
 import { CancellationError } from '../../common/interruptible';
 
 /**
@@ -302,6 +301,8 @@ export abstract class _BoxedExpression implements BoxedExpression {
       metadata: defaultOptions.metadata,
     };
 
+    // Dynamic import to avoid circular dependency
+    const { serializeJson } = require('./serialize');
     return serializeJson(this.engine, this, opts);
   }
 
@@ -620,7 +621,11 @@ export abstract class _BoxedExpression implements BoxedExpression {
       | string
       | BoxedExpression
       | Iterable<BoxedExpression>
-  ): null | ReadonlyArray<BoxedExpression> {
+  ):
+    | null
+    | ReadonlyArray<BoxedExpression>
+    | Record<string, BoxedExpression>
+    | Array<Record<string, BoxedExpression>> {
     return null;
   }
 
@@ -713,7 +718,13 @@ export abstract class _BoxedExpression implements BoxedExpression {
     return this;
   }
 
+  trigSimplify(): BoxedExpression {
+    return this.simplify({ strategy: 'fu' });
+  }
+
   expand(): BoxedExpression {
+    // Dynamic import to avoid circular dependency
+    const { expand } = require('./expand');
     return expand(this) ?? this;
   }
 
@@ -730,7 +741,11 @@ export abstract class _BoxedExpression implements BoxedExpression {
   }
 
   compile(options?: {
-    to?: 'javascript' | 'wgsl' | 'python' | 'webassembly';
+    to?: string;
+    target?: any; // CompileTarget, but any to avoid circular deps
+    operators?:
+      | Partial<Record<MathJsonSymbol, [op: string, prec: number]>>
+      | ((op: MathJsonSymbol) => [op: string, prec: number] | undefined);
     functions?: Record<MathJsonSymbol, string | ((...any) => any)>;
     vars?: Record<MathJsonSymbol, string>;
     imports?: ((...any) => any)[];
@@ -738,20 +753,41 @@ export abstract class _BoxedExpression implements BoxedExpression {
     fallback?: boolean;
   }): ((...args: any[]) => any) & { isCompiled?: boolean } {
     try {
-      const target = options?.to ?? 'javascript';
-
       // eslint-disable-next-line @typescript-eslint/no-this-alias
       const expr = this as BoxedExpression;
 
-      // For now, only JavaScript is implemented
-      if (target !== 'javascript') {
+      // Determine the target to use
+      let languageTarget;
+
+      if (options?.target) {
+        // Direct target override - use BaseCompiler
+        const { BaseCompiler } = require('../compilation/base-compiler');
+        const code = BaseCompiler.compile(expr, options.target);
+
+        // Create a function that returns the compiled code
+        const result = function () {
+          return code;
+        };
+        Object.defineProperty(result, 'toString', { value: () => code });
+        Object.defineProperty(result, 'isCompiled', { value: true });
+        return result as any;
+      }
+
+      const targetName = options?.to ?? 'javascript';
+
+      // Look up the target in the registry
+      // @ts-ignore - accessing internal property
+      languageTarget = this.engine._getCompilationTarget(targetName);
+
+      if (!languageTarget) {
         throw new Error(
-          `Compilation target "${target}" is not yet implemented. Available targets: javascript`
+          `Compilation target "${targetName}" is not registered. Available targets: ${Array.from(this.engine['_compilationTargets'].keys()).join(', ')}`
         );
       }
 
-      const jsTarget = new JavaScriptTarget();
-      return jsTarget.compileToExecutable(expr, {
+      // Use the language target to compile
+      return languageTarget.compileToExecutable(expr, {
+        operators: options?.operators,
         functions: options?.functions,
         vars: options?.vars,
         imports: options?.imports,
@@ -759,7 +795,11 @@ export abstract class _BoxedExpression implements BoxedExpression {
       });
     } catch (e) {
       // @fixme: the fallback needs to handle multiple arguments
-      if (options?.fallback ?? true) return applicableN1(this);
+      if (options?.fallback ?? true) {
+        // Dynamic import to avoid circular dependency
+        const { applicableN1 } = require('../function-utils');
+        return applicableN1(this);
+      }
       throw e;
     }
   }

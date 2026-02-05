@@ -127,6 +127,10 @@ function serializeAdd(serializer: Serializer, expr: Expression): string {
   const name = operator(expr);
   let result = '';
   let arg = operand(expr, 1);
+  // Note: This Negate case is not expected to be hit because Negate has its
+  // own serialize handler (defined in definitions.ts via makeSerializeHandler).
+  // This function is only registered as the serializer for 'Add', so `name`
+  // should always be 'Add' or 'Subtract'. Kept for defensive purposes.
   if (name === 'Negate') {
     result = '-' + serializer.wrap(arg, ADDITION_PRECEDENCE + 1);
   } else if (name === 'Subtract') {
@@ -428,7 +432,9 @@ function parseFraction(parser: Parser): Expression | null {
   // Accept forms like: `\frac{d}{dx} f`, `\frac{\mathrm{d}}{dx} f`
   const numerSym = symbol(numer);
   const isDifferential =
-    numerSym === 'd' || numerSym === 'd_upright' || numerSym === 'differentialD';
+    numerSym === 'd' ||
+    numerSym === 'd_upright' ||
+    numerSym === 'differentialD';
 
   if (isDifferential) {
     // Extract variable(s) from the denominator. Typical forms:
@@ -552,12 +558,27 @@ function serializePower(
     } else if (val2 < 0) {
       return serializer.serialize(['Divide', '1', ['Power', base, -val2]]);
     } else if (operator(exp) === 'Divide' || operator(exp) === 'Rational') {
-      if (machineValue(operand(exp, 1)) === 1) {
+      const num = machineValue(operand(exp, 1));
+      const denom = machineValue(operand(exp, 2));
+      if (num === 1) {
         // It's x^{1/n} -> it's a root
         const style = serializer.rootStyle(expr, serializer.level);
         return serializeRoot(serializer, style, base, operand(exp, 2));
       }
-      if (machineValue(operand(exp, 2)) === 2) {
+      if (num === -1) {
+        // It's x^{-1/n} -> it's 1/root(x, n)
+        if (denom === 2) {
+          // x^{-1/2} -> 1/sqrt(x)
+          return serializer.serialize(['Divide', '1', ['Sqrt', base]]);
+        }
+        // x^{-1/n} -> 1/root(x, n)
+        return serializer.serialize([
+          'Divide',
+          '1',
+          ['Root', base, operand(exp, 2)],
+        ]);
+      }
+      if (denom === 2) {
         // It's x^(n/2) -> it's √x^n
         return `${serializer.serialize(['Sqrt', base])}^{${serializer.serialize(
           operand(exp, 1)
@@ -572,15 +593,24 @@ function serializePower(
     }
   }
 
+  const wrapNegativeBase = (latex: string): string =>
+    latex.startsWith('-') ? serializer.wrapString(latex, 'normal') : latex;
+
   // For improved typography, serialize 2^2^2 as 2^{2^2} rather than {2^2}^2. Note that 2^2^2 is invalid LaTeX.
   if (operator(base) === 'Power') {
     const baseBody = operand(base, 1);
     const baseExponent = operand(base, 2);
+    const baseBodyLatex = wrapNegativeBase(serializer.wrapShort(baseBody));
+    const baseExponentLatex = serializer.wrapShort(baseExponent);
     return `
-      ${serializer.wrapShort(baseBody)}^{${supsub('^', serializer.wrapShort(baseExponent), serializer.serialize(exp))}}`;
+      ${baseBodyLatex}^{${supsub('^', baseExponentLatex, serializer.serialize(exp))}}`;
   }
 
-  return supsub('^', serializer.wrapShort(base), serializer.serialize(exp));
+  return supsub(
+    '^',
+    wrapNegativeBase(serializer.wrapShort(base)),
+    serializer.serialize(exp)
+  );
 }
 
 export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
@@ -593,7 +623,7 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     latexTrigger: ['\\degree'],
     kind: 'postfix',
     precedence: 880,
-    parse: (_parser, lhs) => ['Degrees', lhs],
+    parse: (_parser, lhs) => ['Degrees', lhs] as Expression,
     serialize: (serializer: Serializer, expr: Expression): string => {
       return joinLatex([serializer.serialize(operand(expr, 1)), '\\degree']);
     },
@@ -602,24 +632,24 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     latexTrigger: ['\\degree'],
     kind: 'postfix',
     precedence: 880,
-    parse: (_parser, lhs) => ['Degrees', lhs],
+    parse: (_parser, lhs) => ['Degrees', lhs] as Expression,
   },
   {
     latexTrigger: ['^', '<{>', '\\circ', '<}>'],
     kind: 'postfix',
-    parse: (_parser, lhs) => ['Degrees', lhs],
+    parse: (_parser, lhs) => ['Degrees', lhs] as Expression,
   },
 
   {
     latexTrigger: ['^', '\\circ'],
     kind: 'postfix',
-    parse: (_parser, lhs) => ['Degrees', lhs],
+    parse: (_parser, lhs) => ['Degrees', lhs] as Expression,
   },
   {
     latexTrigger: ['°'],
     kind: 'postfix',
     precedence: 880,
-    parse: (_parser, lhs) => ['Degrees', lhs],
+    parse: (_parser, lhs) => ['Degrees', lhs] as Expression,
   },
 
   {
@@ -669,11 +699,19 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
   {
     kind: 'function',
     symbolTrigger: 'exp',
-    parse: 'Exp',
+    parse: (parser: Parser) => {
+      const args = parser.parseArguments('implicit');
+      if (args === null) return 'Exp' as Expression;
+      return ['Exp', ...args] as Expression;
+    },
   },
   {
     latexTrigger: '\\exp',
-    parse: 'Exp',
+    parse: (parser: Parser) => {
+      const args = parser.parseArguments('implicit');
+      if (args === null) return 'Exp' as Expression;
+      return ['Exp', ...args] as Expression;
+    },
   },
   {
     name: 'ImaginaryUnit',
@@ -698,13 +736,15 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     kind: 'matchfix',
     openTrigger: '|',
     closeTrigger: '|',
-    parse: (_parser, body) => (isEmptySequence(body) ? null : ['Abs', body]),
+    parse: (_parser, body) =>
+      isEmptySequence(body) ? null : (['Abs', body] as Expression),
   },
   {
     kind: 'matchfix',
     openTrigger: ['\\vert'],
     closeTrigger: ['\\vert'],
-    parse: (_parser, body) => (isEmptySequence(body) ? null : ['Abs', body]),
+    parse: (_parser, body) =>
+      isEmptySequence(body) ? null : (['Abs', body] as Expression),
   },
   {
     symbolTrigger: 'abs',
@@ -744,13 +784,15 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     kind: 'matchfix',
     openTrigger: '\\lceil',
     closeTrigger: '\\rceil',
-    parse: (_parser, body) => (isEmptySequence(body) ? null : ['Ceil', body]),
+    parse: (_parser, body) =>
+      isEmptySequence(body) ? null : (['Ceil', body] as Expression),
   },
   {
     kind: 'matchfix',
     openTrigger: ['\u2308'], // ⌈ U+2308 LEFT CEILING
     closeTrigger: ['\u2309'], // ⌉ U+2309 RIGHT CEILING
-    parse: (_parser, body) => (isEmptySequence(body) ? null : ['Ceil', body]),
+    parse: (_parser, body) =>
+      isEmptySequence(body) ? null : (['Ceil', body] as Expression),
   },
   {
     symbolTrigger: 'ceil',
@@ -853,13 +895,15 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     kind: 'matchfix',
     openTrigger: '\\lfloor',
     closeTrigger: '\\rfloor',
-    parse: (_parser, body) => (isEmptySequence(body) ? null : ['Floor', body]),
+    parse: (_parser, body) =>
+      isEmptySequence(body) ? null : (['Floor', body] as Expression),
   },
   {
     kind: 'matchfix',
     openTrigger: ['\u230a'], // ⌊ U+230A LEFT FLOOR
     closeTrigger: ['\u230b'], // ⌋ U+230B RIGHT FLOOR
-    parse: (_parser, body) => (isEmptySequence(body) ? null : ['Floor', body]),
+    parse: (_parser, body) =>
+      isEmptySequence(body) ? null : (['Floor', body] as Expression),
   },
   {
     symbolTrigger: 'floor',
@@ -870,9 +914,121 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     latexTrigger: ['\\Gamma'],
     parse: 'Gamma',
   },
+  // Riemann zeta function - \zeta parses to Zeta function when followed by arguments
+  // Note: \zeta without arguments is handled by definitions-symbols.ts as Greek letter
+  {
+    latexTrigger: ['\\zeta'],
+    kind: 'function',
+    parse: 'Zeta',
+  },
+  // Beta function - \Beta parses to Beta function when followed by arguments
+  // Note: \Beta without arguments is handled by definitions-symbols.ts as Greek letter
+  {
+    latexTrigger: ['\\Beta'],
+    kind: 'function',
+    parse: 'Beta',
+  },
+  // Lambert W function (product logarithm)
+  {
+    name: 'LambertW',
+    latexTrigger: ['\\operatorname{W}'],
+    kind: 'function',
+    serialize: (serializer, expr) =>
+      '\\operatorname{W}' + serializer.wrapArguments(expr),
+  },
+  // Bessel functions - order is first argument, value is second
+  // BesselJ(n, x) represents J_n(x)
+  {
+    name: 'BesselJ',
+    latexTrigger: ['\\operatorname{J}'],
+    kind: 'function',
+    serialize: (serializer, expr) => {
+      const order = operand(expr, 1);
+      const x = operand(expr, 2);
+      if (order !== undefined && x !== undefined) {
+        return (
+          '\\operatorname{J}_{' +
+          serializer.serialize(order) +
+          '}' +
+          serializer.wrapArguments(['BesselJ', x])
+        );
+      }
+      return '\\operatorname{J}' + serializer.wrapArguments(expr);
+    },
+  },
+  {
+    name: 'BesselY',
+    latexTrigger: ['\\operatorname{Y}'],
+    kind: 'function',
+    serialize: (serializer, expr) => {
+      const order = operand(expr, 1);
+      const x = operand(expr, 2);
+      if (order !== undefined && x !== undefined) {
+        return (
+          '\\operatorname{Y}_{' +
+          serializer.serialize(order) +
+          '}' +
+          serializer.wrapArguments(['BesselY', x])
+        );
+      }
+      return '\\operatorname{Y}' + serializer.wrapArguments(expr);
+    },
+  },
+  {
+    name: 'BesselI',
+    latexTrigger: ['\\operatorname{I}'],
+    kind: 'function',
+    serialize: (serializer, expr) => {
+      const order = operand(expr, 1);
+      const x = operand(expr, 2);
+      if (order !== undefined && x !== undefined) {
+        return (
+          '\\operatorname{I}_{' +
+          serializer.serialize(order) +
+          '}' +
+          serializer.wrapArguments(['BesselI', x])
+        );
+      }
+      return '\\operatorname{I}' + serializer.wrapArguments(expr);
+    },
+  },
+  {
+    name: 'BesselK',
+    latexTrigger: ['\\operatorname{K}'],
+    kind: 'function',
+    serialize: (serializer, expr) => {
+      const order = operand(expr, 1);
+      const x = operand(expr, 2);
+      if (order !== undefined && x !== undefined) {
+        return (
+          '\\operatorname{K}_{' +
+          serializer.serialize(order) +
+          '}' +
+          serializer.wrapArguments(['BesselK', x])
+        );
+      }
+      return '\\operatorname{K}' + serializer.wrapArguments(expr);
+    },
+  },
+  // Airy functions
+  {
+    name: 'AiryAi',
+    latexTrigger: ['\\operatorname{Ai}'],
+    kind: 'function',
+    serialize: (serializer, expr) =>
+      '\\operatorname{Ai}' + serializer.wrapArguments(expr),
+  },
+  {
+    name: 'AiryBi',
+    latexTrigger: ['\\operatorname{Bi}'],
+    kind: 'function',
+    serialize: (serializer, expr) =>
+      '\\operatorname{Bi}' + serializer.wrapArguments(expr),
+  },
   {
     name: 'GCD',
     latexTrigger: ['\\gcd'], // command from amsmath package
+    kind: 'function',
   },
   {
     symbolTrigger: 'gcd',
@@ -933,8 +1089,13 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
 
   {
     name: 'LCM',
+    latexTrigger: ['\\lcm'],
+    kind: 'function',
+  },
+  {
     symbolTrigger: 'lcm',
     kind: 'function',
+    parse: 'LCM',
   },
   {
     symbolTrigger: 'LCM',
@@ -1108,7 +1269,8 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     kind: 'matchfix',
     openTrigger: '||',
     closeTrigger: '||',
-    parse: (_parser, expr) => (isEmptySequence(expr) ? null : ['Norm', expr]),
+    parse: (_parser, expr) =>
+      isEmptySequence(expr) ? null : (['Norm', expr] as Expression),
   },
   {
     //   /** If the argument is a vector */
@@ -1117,7 +1279,8 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
     kind: 'matchfix',
     openTrigger: ['\\left', '\\Vert'],
     closeTrigger: ['\\right', '\\Vert'],
-    parse: (_parser, expr) => (isEmptySequence(expr) ? null : ['Norm', expr]),
+    parse: (_parser, expr) =>
+      isEmptySequence(expr) ? null : (['Norm', expr] as Expression),
   },
   {
     name: 'PlusMinus',
@@ -1227,8 +1390,13 @@ export const DEFINITIONS_ARITHMETIC: LatexDictionary = [
   {
     name: 'Square',
     precedence: 720,
-    serialize: (serializer, expr) =>
-      serializer.wrapShort(operand(expr, 1)) + '^2',
+    serialize: (serializer, expr) => {
+      const base = serializer.wrapShort(operand(expr, 1));
+      const wrapped = base.startsWith('-')
+        ? serializer.wrapString(base, 'normal')
+        : base;
+      return wrapped + '^2';
+    },
   },
   {
     latexTrigger: ['\\sum'],
@@ -1287,6 +1455,7 @@ function getIndexAssignment(
       index: string;
       lower?: Expression;
       upper?: Expression;
+      element?: Expression;
     }
   | undefined {
   if (expr === null) return undefined;
@@ -1316,7 +1485,58 @@ function getIndexAssignment(
     return { index, lower, upper };
   }
 
+  // Handle Element expressions: ["Element", "n", "N"]
+  // e.g., `n \in N` in the subscript
+  if (operator(expr) === 'Element') {
+    const index = symbol(operand(expr, 1)) ?? 'Nothing';
+    return { index, element: expr };
+  }
+
   return undefined;
+}
+
+/**
+ * Check if an expression is likely a condition (predicate) rather than
+ * an indexing set assignment or Element expression.
+ * Conditions are typically relational expressions like `n > 0`, `x < 10`, etc.
+ */
+function isConditionExpression(expr: Expression): boolean {
+  const op = operator(expr);
+  if (!op) return false;
+  // Common relational operators that indicate conditions
+  const conditionOperators = new Set([
+    'Less',
+    'LessEqual',
+    'Greater',
+    'GreaterEqual',
+    'NotEqual',
+    'And',
+    'Or',
+    'Not',
+    // Also allow function applications as conditions (e.g., IsPrime(n))
+  ]);
+  return conditionOperators.has(op);
+}
+
+/**
+ * Extract operands from a sequence-like expression.
+ * Handles Sequence, Tuple, and single expressions.
+ */
+function getSequenceOrTuple(expr: Expression | null): Expression[] {
+  if (expr === null) return [];
+
+  // First try getSequence (handles Sequence and Delimiter)
+  const seq = getSequence(expr);
+  if (seq) return [...seq];
+
+  // Also handle Tuple (which is what commas in subscripts often parse to)
+  if (operator(expr) === 'Tuple') {
+    const ops = operands(expr);
+    return ops ? [...ops] : [expr];
+  }
+
+  // Single expression
+  return [expr];
 }
 
 function getIndexes(
@@ -1326,12 +1546,13 @@ function getIndexes(
   index: string;
   lower?: Expression;
   upper?: Expression;
+  element?: Expression;
 }[] {
   if (isEmptySequence(sub)) sub = null;
   if (isEmptySequence(sup)) sup = null;
 
-  const subs = sub === null ? [] : (getSequence(sub) ?? [sub]);
-  const sups = sup === null ? [] : (getSequence(sup) ?? [sup]);
+  const subs = getSequenceOrTuple(sub);
+  const sups = getSequenceOrTuple(sup);
 
   // If we have a superscript, we expect to have a subscript of the form
   // `i=1, j=1` with a superscript of the form `10, 20`
@@ -1341,14 +1562,62 @@ function getIndexes(
 
   // In both cases, we access sups[i], which may be undefined
 
-  return subs
-    .map((subExpr, i) => getIndexAssignment(subExpr, sups[i]))
-    .filter((x) => x !== undefined);
+  // EL-3: Process subscripts, attaching conditions to preceding Element expressions
+  const results: {
+    index: string;
+    lower?: Expression;
+    upper?: Expression;
+    element?: Expression;
+  }[] = [];
+
+  let i = 0;
+  while (i < subs.length) {
+    const subExpr = subs[i];
+    const assignment = getIndexAssignment(subExpr, sups[i]);
+
+    if (assignment) {
+      // EL-3: Check if this is an Element expression and the next item is a condition
+      if (assignment.element && i + 1 < subs.length) {
+        const nextExpr = subs[i + 1];
+        // Check if next expression is a condition (not another Element or assignment)
+        // Note: GreaterEqual IS allowed as a condition (e.g., n >= 2) when following an Element
+        // It's only a traditional index assignment when standalone (not after Element)
+        if (
+          isConditionExpression(nextExpr) &&
+          operator(nextExpr) !== 'Element' &&
+          operator(nextExpr) !== 'Equal'
+        ) {
+          // Attach condition to the Element expression
+          // Element goes from ["Element", var, domain] to ["Element", var, domain, condition]
+          const elementExpr = assignment.element;
+          if (Array.isArray(elementExpr) && elementExpr.length >= 3) {
+            // Create a new array with the condition appended
+            const newElement: Expression = [
+              elementExpr[0] as string,
+              ...elementExpr.slice(1),
+              nextExpr,
+            ];
+            assignment.element = newElement;
+          }
+          i++; // Skip the condition expression
+        }
+      }
+      results.push(assignment);
+    }
+    i++;
+  }
+
+  return results;
 }
 
 function parseBigOp(name: string, reduceOp: string, minPrec: number) {
   return (parser: Parser): Expression | null => {
     parser.skipSpace();
+
+    // Push a symbol table early to isolate subscript/superscript parsing
+    // This prevents index symbols (like 'n' in 'n \in S, n > 0') from
+    // polluting the outer scope
+    parser.pushSymbolTable();
 
     //
     // Capture the subscripts and superscripts
@@ -1367,18 +1636,17 @@ function parseBigOp(name: string, reduceOp: string, minPrec: number) {
     // \sum \{ 1, 2, 3 \}
     if (!sup && !sub) {
       const collection = parser.parseExpression({ minPrec: minPrec });
+      parser.popSymbolTable();
       if (collection) return ['Reduce', collection, reduceOp];
+      return null;
     }
 
     const indexes = getIndexes(sub, sup);
 
     //
     // Parse the body of the function
+    // The index symbols are already in scope from parsing the subscripts
     //
-    parser.pushSymbolTable();
-
-    for (const indexinSet of indexes)
-      parser.addSymbol(indexinSet.index, 'symbol');
 
     const fn = parser.parseExpression({ minPrec: minPrec });
 
@@ -1387,13 +1655,19 @@ function parseBigOp(name: string, reduceOp: string, minPrec: number) {
     if (fn === null) return [name];
 
     //
-    // Turn the indexing sets into a sequence of tuples
+    // Turn the indexing sets into a sequence of tuples or Element expressions
     //
     const indexingSetArguments: Expression[] = [];
-    for (const indexinSet of indexes) {
-      const lower = indexinSet.lower;
-      const upper = indexinSet.upper;
-      const index = indexinSet.index ?? 'Nothing';
+    for (const indexingSet of indexes) {
+      // Handle Element expressions: preserve them directly
+      if (indexingSet.element) {
+        indexingSetArguments.push(indexingSet.element);
+        continue;
+      }
+      // Handle traditional range-based indexing sets
+      const lower = indexingSet.lower;
+      const upper = indexingSet.upper;
+      const index = indexingSet.index ?? 'Nothing';
       if (upper !== null && upper !== undefined)
         indexingSetArguments.push(['Tuple', index, lower ?? 1, upper]);
       else if (lower !== null && lower !== undefined)
@@ -1410,6 +1684,7 @@ const INDEXING_SET_HEADS = new Set([
   'Pair',
   'Single',
   'Limits',
+  'Element',
 ]);
 
 function sanitizeLimitOperand(
@@ -1439,6 +1714,14 @@ function serializeIndexingSet(
   serializer: Serializer,
   indexingSet: Expression
 ): { sub?: string; sup?: string } {
+  // Handle Element expressions: ["Element", "n", "N"]
+  // Serialize as `n\in N`
+  if (operator(indexingSet) === 'Element') {
+    const indexLatex = serializer.serialize(operand(indexingSet, 1));
+    const collectionLatex = serializer.serialize(operand(indexingSet, 2));
+    return { sub: `${indexLatex}\\in ${collectionLatex}` };
+  }
+
   let indexExpr = operand(indexingSet, 1);
   if (indexExpr !== null && operator(indexExpr) === 'Hold')
     indexExpr = operand(indexExpr, 1);

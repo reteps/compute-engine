@@ -70,6 +70,18 @@ export function canonicalPower(
     ]);
   }
 
+  // (a/b)^{-n} -> a^{-n} / b^{-n} = b^n / a^n
+  // Only distribute when exponent is negative to normalize negative exponents on fractions
+  // e.g., (a/b)^{-2} -> b^2 / a^2
+  if (a.operator === 'Divide' && a.op1 && a.op2 && b.isNegative === true) {
+    const num = a.op1;
+    const denom = a.op2;
+    // Use the pow function to recursively canonicalize
+    return pow(num, b, { numericApproximation: false }).div(
+      pow(denom, b, { numericApproximation: false })
+    );
+  }
+
   // Onwards, the focus on operations is where is a *numeric* exponent.
   // Therefore, exclude cases - which may otherwise be valid - of the exponent either: being a function (e.g.
   // '0 + 0'), a symbol, or of a non-numeric type.
@@ -156,6 +168,9 @@ export function canonicalPower(
     if (b.isPositive) {
       // (note: 0^∞ = 0, 1^∞ = NaN, covered prior)
 
+      // e^∞ = ∞ (handle explicitly before general case)
+      if (a.symbol === 'ExponentialE') return ce.PositiveInfinity;
+
       // (-1)^∞ = NaN
       // Because of oscillations in the limit.
       if (a.is(-1)) return ce.NaN;
@@ -178,6 +193,9 @@ export function canonicalPower(
 
     // x^-oo
     if (b.isNegative) {
+      // e^(-∞) = 0 (handle explicitly before general case)
+      if (a.symbol === 'ExponentialE') return ce.Zero;
+
       if (a.is(-1)) return ce.NaN;
       //Same result for all infinity types...
       if (a.isInfinity) return ce.Zero;
@@ -198,8 +216,41 @@ export function canonicalPower(
     return ce.NaN;
   }
 
-  //'AnyInfinity^{~oo}' (i.e. ComplexInfinity)
+  //'AnyInfinity^b'
   if (a.isNumberLiteral && a.isInfinity) {
+    // Special handling for NegativeInfinity with integer/rational exponents
+    if (a.isNegative) {
+      // (-inf)^n for integer n
+      if (b.isInteger === true) {
+        if (b.isEven === true) return ce.PositiveInfinity; // (-inf)^(even) -> +inf
+        if (b.isOdd === true) return ce.NegativeInfinity; // (-inf)^(odd) -> -inf
+      }
+
+      // (-inf)^(n/m) for rational n/m
+      if (b.isRational === true) {
+        const [numExpr, denomExpr] = b.numeratorDenominator;
+        const num = numExpr.re;
+        const denom = denomExpr.re;
+
+        if (
+          typeof num === 'number' &&
+          typeof denom === 'number' &&
+          Number.isInteger(num) &&
+          Number.isInteger(denom)
+        ) {
+          const numIsEven = num % 2 === 0;
+          const numIsOdd = num % 2 !== 0;
+          const denomIsOdd = denom % 2 !== 0;
+
+          // n even, m odd -> +inf
+          if (numIsEven && denomIsOdd) return ce.PositiveInfinity;
+
+          // n odd, m odd -> -inf (real interpretation)
+          if (numIsOdd && denomIsOdd) return ce.NegativeInfinity;
+        }
+      }
+    }
+
     // If the exponent is pure imaginary, the result is NaN
     //(↓fix?:ensure both these cases narrow down to 'b' being a num./symbol literal)
     if (b.type.matches('imaginary')) return ce.NaN;

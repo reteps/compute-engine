@@ -31,19 +31,44 @@ export function canonicalDivide(
 
   if (op1.isNaN || op2.isNaN) return ce.NaN;
 
+  // A purely numeric expression (no symbols) that is not already a literal.
+  // Such expressions may simplify to 0 (e.g. 1-1) and we want to avoid
+  // collapsing divisions like 0/(1-1) or (1-1)/(1-1) during canonicalization.
+  const op2IsConstantExpression =
+    op2.symbols.length === 0 && !op2.isNumberLiteral;
+
   // 0/0 = NaN, a/0 = ~∞ (a≠0)
+  // Note: We only check .is(0) here, not .N().is(0), because .N() can be
+  // expensive (e.g., Monte Carlo integration) and canonicalization must be fast.
+  // Expressions like (1-1)/0 won't be detected as 0/0 here, but will be
+  // handled during simplification.
   if (op2.is(0)) return op1.is(0) ? ce.NaN : ce.ComplexInfinity;
 
-  // 0/a = 0 (a≠0)
-  if (op1.is(0)) return ce.Zero;
+  // 0/a = 0 (a≠0, a is finite)
+  if (op1.is(0) && op2.isFinite !== false) {
+    // Be conservative with constant (no-unknown) denominators that aren't
+    // already a literal number. Avoid 0/(1-1) -> 0 during canonicalization.
+    if (op2IsConstantExpression)
+      return ce._fn('Divide', [op1, op2], { canonical: false });
+    return ce.Zero;
+  }
 
-  // a/a = 1 (if a ≠ 0)
-  if (op2.is(0) === false) {
+  // a/∞ = 0, ∞/∞ = NaN (check before a/a = 1 rule)
+  if (op2.isInfinity) return op1.isInfinity ? ce.NaN : ce.Zero;
+
+  // a/a = 1 (if a ≠ 0 and a is finite)
+  if (op2.is(0) === false && op2.isFinite !== false) {
     if (op1.symbol !== null && op1.symbol === op2.symbol && op1.isConstant)
       return ce.One;
 
     // (x+1)/(x+1) = 1 (if x+1 ≠ 0)
-    if (op1.isSame(op2)) return ce.One;
+    if (op1.isSame(op2)) {
+      // Same conservative guard as above: don't collapse constant expressions
+      // like (1-1)/(1-1) into 1 during canonicalization.
+      if (op2IsConstantExpression)
+        return ce._fn('Divide', [op1, op2], { canonical: false });
+      return ce.One;
+    }
   }
 
   // -a/-b = a/b
@@ -76,9 +101,6 @@ export function canonicalDivide(
 
   // 1/a = a^-1
   if (op1.is(1)) return op2.inv();
-
-  // a/∞ = 0, ∞/∞ = NaN
-  if (op2.isInfinity) return op1.isInfinity ? ce.NaN : ce.Zero;
 
   // Note: (-1)/a ≠ -(a^-1). We distribute Negate over Divide.
 
@@ -115,13 +137,16 @@ export function canonicalDivide(
     }
 
     // a/b with a and b integer literals -> a/b rational
+    // But handle division by zero: 0/0 = NaN, a/0 = ~∞
     if (
       typeof v1 === 'number' &&
       Number.isInteger(v1) &&
       typeof v2 === 'number' &&
       Number.isInteger(v2)
-    )
+    ) {
+      if (v2 === 0) return v1 === 0 ? ce.NaN : ce.ComplexInfinity;
       return ce.number([v1, v2]);
+    }
 
     if (typeof v1 === 'number' && Number.isInteger(v1)) {
       if (v1 === 0) return ce.Zero;
@@ -194,8 +219,8 @@ export function div(
     if (denom === 1) return num;
     // a/(-1) = -a
     if (denom === -1) return num.neg();
-    // a/0 = NaN (a≠0)
-    if (denom === 0) return ce.NaN;
+    // a/0 = ~∞ (a≠0) - ComplexInfinity as "better NaN"
+    if (denom === 0) return ce.ComplexInfinity;
 
     if (num.isNumberLiteral) {
       const n = num.numericValue!;

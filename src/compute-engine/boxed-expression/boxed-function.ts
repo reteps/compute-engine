@@ -22,6 +22,7 @@ import type {
 } from '../global-types';
 
 import { isFiniteIndexedCollection, zip } from '../collection-utils';
+import { isBoxedTensor } from './boxed-tensor';
 import { Type } from '../../common/type/types';
 import { BoxedType } from '../../common/type/boxed-type';
 import { parseType } from '../../common/type/parse';
@@ -35,6 +36,11 @@ import {
 import { NumericValue } from '../numeric-value/types';
 
 import { findUnivariateRoots } from './solve';
+import {
+  solveLinearSystem,
+  solvePolynomialSystem,
+  solveLinearInequalitySystem,
+} from './solve-linear-system';
 import { replace } from './rules';
 import { negate } from './negate';
 import { Product } from './product';
@@ -173,13 +179,19 @@ export class BoxedFunction extends _BoxedExpression {
         this.engine._typeResolver
       );
     } else if (isSignatureType(def.signature.type)) {
+      // Preserve the argument information when updating the result type
+      const oldSig = def.signature.type;
       def.signature = new BoxedType(
         {
           kind: 'signature',
+          args: oldSig.args,
+          optArgs: oldSig.optArgs,
+          variadicArg: oldSig.variadicArg,
+          variadicMin: oldSig.variadicMin,
           result:
             inferenceMode === 'narrow'
-              ? narrow(def.signature.type.result, t)
-              : widen(def.signature.type.result, t),
+              ? narrow(oldSig.result, t)
+              : widen(oldSig.result, t),
         },
         this.engine._typeResolver
       );
@@ -426,17 +438,10 @@ export class BoxedFunction extends _BoxedExpression {
     //
     // Log/Ln
     //
-    if (expr.operator === 'Log' || expr.operator === 'Ln') {
-      let base = expr.op2.re;
-      if (isNaN(base) && expr.operator === 'Log') base = 10;
-
-      const [coef, rest] = expr.op1.toNumericValue();
-      if (coef.isOne) return [coef, this];
-      return ce
-        .box(coef.ln(base))
-        .add(ce.function(expr.operator, [rest, expr.op2]))
-        .toNumericValue();
-    }
+    // Logarithms don't have numeric coefficients to extract.
+    // Keep them symbolic - don't evaluate or expand.
+    if (expr.operator === 'Log' || expr.operator === 'Ln')
+      return [ce._numericValue(1), this];
 
     // @todo:  could consider others: Exp, trig functions
 
@@ -756,19 +761,31 @@ export class BoxedFunction extends _BoxedExpression {
     // Mathematica returns `Log[0]` as `-∞`
     if (this.is(0)) return this.engine.NegativeInfinity;
 
-    // ln(exp(x)) = x
-    if (this.operator === 'Exp') return this.op1;
+    // ln(exp(x)) = x (for natural log)
+    // ln_c(exp(x)) = x / ln(c) (for other bases)
+    if (this.operator === 'Exp') {
+      if (!base) return this.op1; // natural log
+      return this.op1.div(base.ln()); // log_c(e^x) = x / ln(c)
+    }
 
     // ln_c(c) = 1
     if (base && this.isSame(base)) return this.engine.One;
 
     // ln(e) = 1
-    if (!base && this.isSame(this.engine.E)) return this.engine.One;
+    // ln_c(e) = 1 / ln(c)
+    if (this.isSame(this.engine.E)) {
+      if (!base) return this.engine.One; // ln(e) = 1
+      return this.engine.One.div(base.ln()); // log_c(e) = 1/ln(c)
+    }
 
-    // ln(e^x) = x
+    // ln(e^x) = x (for natural log)
+    // ln_c(e^x) = x / ln(c) (for other bases)
     if (this.operator === 'Power') {
       const [b, exp] = this.ops;
-      if (b.isSame(this.engine.E)) return exp;
+      if (b.isSame(this.engine.E)) {
+        if (!base) return exp; // natural log: ln(e^x) = x
+        return exp.div(base.ln()); // log_c(e^x) = x / ln(c)
+      }
       return exp.mul(b.ln(base));
     }
 
@@ -857,6 +874,19 @@ export class BoxedFunction extends _BoxedExpression {
     );
   }
 
+  /** The shape of the tensor (dimensions), derived from the type */
+  get shape(): number[] {
+    const t = this.type.type;
+    if (typeof t === 'object' && t.kind === 'list' && t.dimensions)
+      return t.dimensions;
+    return [];
+  }
+
+  /** The rank of the tensor (number of dimensions), derived from the type */
+  get rank(): number {
+    return this.shape.length;
+  }
+
   simplify(options?: Partial<SimplifyOptions>): BoxedExpression {
     return simplify(this, options).at(-1)?.value ?? this;
   }
@@ -879,8 +909,41 @@ export class BoxedFunction extends _BoxedExpression {
       | string
       | BoxedExpression
       | Iterable<BoxedExpression>
-  ): null | ReadonlyArray<BoxedExpression> {
+  ):
+    | null
+    | ReadonlyArray<BoxedExpression>
+    | Record<string, BoxedExpression>
+    | Array<Record<string, BoxedExpression>> {
     const varNames = normalizedUnknownsForSolve(vars ?? this.unknowns);
+
+    // Handle List of equations (system of equations)
+    if (this.operator === 'List') {
+      const equations = this.ops;
+      if (equations && equations.every((eq) => eq.operator === 'Equal')) {
+        // Try linear system first
+        const linearResult = solveLinearSystem([...equations], varNames);
+        if (linearResult) return linearResult;
+
+        // Try polynomial system (non-linear)
+        const polyResult = solvePolynomialSystem([...equations], varNames);
+        if (polyResult) return polyResult;
+      }
+
+      // Check for inequality systems (Less, LessEqual, Greater, GreaterEqual)
+      const inequalityOps = ['Less', 'LessEqual', 'Greater', 'GreaterEqual'];
+      if (
+        equations &&
+        equations.every((eq) => inequalityOps.includes(eq.operator ?? ''))
+      ) {
+        const inequalityResult = solveLinearInequalitySystem(
+          [...equations],
+          varNames
+        );
+        if (inequalityResult) return inequalityResult;
+      }
+    }
+
+    // Existing univariate solving
     if (varNames.length !== 1) return null;
     return findUnivariateRoots(this, varNames[0]);
   }
@@ -1009,10 +1072,16 @@ export class BoxedFunction extends _BoxedExpression {
 
       //
       // 2/ Broadcast if applicable
+      // Skip broadcasting for Add/Multiply with tensors - they have their own
+      // element-wise handling in addTensors/mulTensors
       //
+      const hasTensors = this.ops!.some((x) => isBoxedTensor(x));
+      const skipBroadcastForTensors =
+        hasTensors && (this.operator === 'Add' || this.operator === 'Multiply');
       if (
         def.broadcastable &&
-        this.ops!.some((x) => isFiniteIndexedCollection(x))
+        this.ops!.some((x) => isFiniteIndexedCollection(x)) &&
+        !skipBroadcastForTensors
       ) {
         const items = zip(this._ops);
         if (!items) return this.engine.Nothing;
@@ -1093,10 +1162,16 @@ export class BoxedFunction extends _BoxedExpression {
 
       //
       // 2/ Broadcast if applicable
+      // Skip broadcasting for Add/Multiply with tensors - they have their own
+      // element-wise handling
       //
+      const hasTensors = this.ops!.some((x) => isBoxedTensor(x));
+      const skipBroadcastForTensors =
+        hasTensors && (this.operator === 'Add' || this.operator === 'Multiply');
       if (
         def?.broadcastable &&
-        this.ops!.some((x) => isFiniteIndexedCollection(x))
+        this.ops!.some((x) => isFiniteIndexedCollection(x)) &&
+        !skipBroadcastForTensors
       ) {
         const items = zip(this._ops);
         if (!items) return this.engine.Nothing;

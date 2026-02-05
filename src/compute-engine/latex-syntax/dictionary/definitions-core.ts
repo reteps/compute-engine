@@ -147,7 +147,7 @@ export const DEFINITIONS_CORE: LatexDictionary = [
     latexTrigger: ['\\mapsto'],
     kind: 'infix',
     precedence: ARROW_PRECEDENCE, // MathML rightwards arrow
-    parse: (parser: Parser, lhs: Expression) => {
+    parse: (parser: Parser, lhs: Expression, _until) => {
       let params: string[] = [];
       if (operator(lhs) === 'Delimiter') lhs = operand(lhs, 1) ?? 'Nothing';
       if (operator(lhs) === 'Sequence') {
@@ -165,7 +165,7 @@ export const DEFINITIONS_CORE: LatexDictionary = [
       if (operator(rhs) === 'Delimiter') rhs = operand(rhs, 1) ?? 'Nothing';
       if (operator(rhs) === 'Sequence') rhs = ['Block', ...operands(rhs)];
 
-      return ['Function', rhs, ...params];
+      return ['Function', rhs, ...params] as Expression;
     },
     serialize: (serializer: Serializer, expr: Expression): string => {
       const args = operands(expr);
@@ -270,9 +270,9 @@ export const DEFINITIONS_CORE: LatexDictionary = [
     latexTrigger: '\\rhd',
     kind: 'infix',
     precedence: 20,
-    parse: (parser: Parser, lhs: Expression) => {
+    parse: (parser: Parser, lhs: Expression, _until) => {
       const rhs = parser.parseExpression({ minPrec: 21 }) ?? 'Nothing';
-      return ['Apply', rhs, lhs];
+      return ['Apply', rhs, lhs] as Expression;
     },
   },
 
@@ -623,7 +623,14 @@ export const DEFINITIONS_CORE: LatexDictionary = [
       // return null (or interpret as a symbol).
 
       // Parse either a group or a single symbol
-      const rhs = parser.parseGroup() ?? parser.parseToken();
+      let rhs = parser.parseGroup() ?? parser.parseToken();
+      // In non-strict mode, also accept parenthesized expressions
+      if (
+        rhs === null &&
+        parser.options.strict === false &&
+        parser.peek === '('
+      )
+        rhs = parser.parseEnclosure();
       return ['Subscript', lhs, rhs];
     },
   } as PostfixEntry,
@@ -773,20 +780,20 @@ export const DEFINITIONS_CORE: LatexDictionary = [
   {
     latexTrigger: ['^', '*'],
     kind: 'postfix',
-    parse: (_parser, lhs) => ['Superstar', lhs],
+    parse: (_parser, lhs) => ['Superstar', lhs] as Expression,
   },
   // { name: 'Superstar', latexTrigger: ['^', '\\star'], kind: 'postfix' },
   {
     latexTrigger: ['_', '*'],
     kind: 'postfix',
-    parse: (_parser, lhs) => ['Substar', lhs],
+    parse: (_parser, lhs) => ['Substar', lhs] as Expression,
   },
   { name: 'Substar', latexTrigger: ['_', '\\star'], kind: 'postfix' },
   { name: 'Superdagger', latexTrigger: ['^', '\\dagger'], kind: 'postfix' },
   {
     latexTrigger: ['^', '\\dag'],
     kind: 'postfix',
-    parse: (_parser, lhs) => ['Superdagger', lhs],
+    parse: (_parser, lhs) => ['Superdagger', lhs] as Expression,
   },
   {
     name: 'Prime',
@@ -889,11 +896,16 @@ export const DEFINITIONS_CORE: LatexDictionary = [
         else if (parser.match('\\tripleprime')) primeCount += 3;
         else return null;
       }
-      if (primeCount === 1) return ['Derivative', ['InverseFunction', lhs]];
+      if (primeCount === 1)
+        return ['Derivative', ['InverseFunction', lhs]] as Expression;
       if (primeCount > 0)
-        return ['Derivative', ['InverseFunction', lhs], primeCount];
+        return [
+          'Derivative',
+          ['InverseFunction', lhs],
+          primeCount,
+        ] as Expression;
 
-      return ['InverseFunction', lhs];
+      return ['InverseFunction', lhs] as Expression;
     },
     serialize: (serializer, expr) =>
       serializer.serialize(operand(expr, 1)) + '^{-1}',
@@ -904,7 +916,7 @@ export const DEFINITIONS_CORE: LatexDictionary = [
     // @todo: Leibniz notation: {% latex " \\frac{d^n}{dx^n} f(x)" %}
     // @todo: Euler modified notation: This notation is used by Mathematica. The Euler notation uses `D` instead of
     // `\partial`: `\partial_{x} f`,  `\partial_{x,y} f`
-    // @todo: Newton notation: `\dot{v}` -> first derivative relative to time t `\ddot{v}` -> second derivative relative to time t
+    // Newton notation (\dot{v}, \ddot{v}) is implemented below
 
     serialize: (serializer: Serializer, expr: Expression): string => {
       const degree = machineValue(operand(expr, 2)) ?? 1;
@@ -916,6 +928,147 @@ export const DEFINITIONS_CORE: LatexDictionary = [
       return base + '^{(' + serializer.serialize(operand(expr, 2)) + ')}';
     },
   },
+
+  // Serializer for D (partial derivative) - outputs Leibniz notation
+  {
+    name: 'D',
+    serialize: (serializer: Serializer, expr: Expression): string => {
+      // Only handle D function expressions, not the plain symbol D
+      if (operator(expr) !== 'D') return 'D';
+
+      // D has form: ["D", function, variable, ...moreVariables]
+      const fn = operand(expr, 1);
+      const variable = operand(expr, 2);
+
+      if (!fn || !variable) return 'D';
+
+      // Count nested D expressions to determine the derivative order
+      let order = 1;
+      let innerFn = fn;
+
+      // Check for nested D with same variable
+      while (operator(innerFn) === 'D') {
+        const innerVar = operand(innerFn, 2);
+        if (symbol(innerVar) === symbol(variable)) {
+          order++;
+          innerFn = operand(innerFn, 1)!;
+        } else {
+          break;
+        }
+      }
+
+      // If the inner function is a Function expression, extract the body
+      // e.g., ["Function", ["Sin", "x"], "x"] -> ["Sin", "x"]
+      let bodyToSerialize = innerFn;
+      if (operator(innerFn) === 'Function') {
+        bodyToSerialize = operand(innerFn, 1) ?? innerFn;
+      }
+
+      // Serialize the function body
+      const fnLatex = serializer.serialize(bodyToSerialize);
+      const varLatex = serializer.serialize(variable);
+
+      // Output Leibniz notation: \frac{d}{dx}f or \frac{d^n}{dx^n}f
+      if (order === 1) {
+        return `\\frac{\\mathrm{d}}{\\mathrm{d}${varLatex}}${fnLatex}`;
+      }
+      return `\\frac{\\mathrm{d}^{${order}}}{\\mathrm{d}${varLatex}^{${order}}}${fnLatex}`;
+    },
+  },
+
+  // Newton notation for time derivatives: \dot{x}, \ddot{x}, etc.
+  {
+    name: 'NewtonDerivative1',
+    latexTrigger: ['\\dot'],
+    kind: 'prefix',
+    precedence: 740,
+    parse: (parser: Parser): Expression | null => {
+      const body = parser.parseGroup();
+      if (body === null) return null;
+      const t = parser.options.timeDerivativeVariable;
+      return ['D', body, t] as Expression;
+    },
+  },
+  {
+    name: 'NewtonDerivative2',
+    latexTrigger: ['\\ddot'],
+    kind: 'prefix',
+    precedence: 740,
+    parse: (parser: Parser): Expression | null => {
+      const body = parser.parseGroup();
+      if (body === null) return null;
+      const t = parser.options.timeDerivativeVariable;
+      return ['D', ['D', body, t], t] as Expression;
+    },
+  },
+  {
+    name: 'NewtonDerivative3',
+    latexTrigger: ['\\dddot'],
+    kind: 'prefix',
+    precedence: 740,
+    parse: (parser: Parser): Expression | null => {
+      const body = parser.parseGroup();
+      if (body === null) return null;
+      const t = parser.options.timeDerivativeVariable;
+      return ['D', ['D', ['D', body, t], t], t] as Expression;
+    },
+  },
+  {
+    name: 'NewtonDerivative4',
+    latexTrigger: ['\\ddddot'],
+    kind: 'prefix',
+    precedence: 740,
+    parse: (parser: Parser): Expression | null => {
+      const body = parser.parseGroup();
+      if (body === null) return null;
+      const t = parser.options.timeDerivativeVariable;
+      return ['D', ['D', ['D', ['D', body, t], t], t], t] as Expression;
+    },
+  },
+
+  // Euler notation for derivatives: D_x f, D^2_x f, D_x^2 f
+  // Uses latexTrigger to intercept before symbol parsing combines D with subscript
+  {
+    name: 'EulerDerivative',
+    latexTrigger: ['D'],
+    kind: 'expression',
+    parse: (parser: Parser): Expression | null => {
+      let degree = 1;
+      let variable: Expression | null = null;
+
+      // Parse subscript and superscript in either order (D_x^2 or D^2_x)
+      let done = false;
+      while (!done) {
+        if (parser.match('_')) {
+          // Parse the subscript (variable)
+          variable = parser.parseGroup() ?? parser.parseToken();
+          if (!variable) return null;
+        } else if (parser.match('^')) {
+          // Parse the superscript (degree)
+          const degExpr = parser.parseGroup() ?? parser.parseToken();
+          degree = machineValue(degExpr) ?? 1;
+        } else {
+          done = true;
+        }
+      }
+
+      // Only trigger if we have a subscript (to distinguish from D as a variable)
+      if (!variable) return null;
+
+      // Parse the function/expression to differentiate
+      parser.skipSpace();
+      const fn = parser.parseExpression({ minPrec: 740 });
+      if (!fn) return null;
+
+      // Build nested D for the degree
+      let result: Expression = fn;
+      for (let i = 0; i < degree; i++) {
+        result = ['D', result, variable] as Expression;
+      }
+      return result;
+    },
+  },
+
   {
     kind: 'environment',
     name: 'Which',
@@ -1194,6 +1347,14 @@ function parsePrime(
   lhs: Expression,
   order: number
 ): Expression | null {
+  // Accumulate additional prime marks (e.g., f''' -> order 3)
+  while (!parser.atEnd) {
+    if (parser.match("'") || parser.match('\\prime')) order++;
+    else if (parser.match('\\doubleprime')) order += 2;
+    else if (parser.match('\\tripleprime')) order += 3;
+    else break;
+  }
+
   // If the lhs is a Prime/Derivative, increase the derivation order
   const lhsh = operator(lhs);
   if (lhsh === 'Derivative' || lhsh === 'Prime') {
@@ -1205,12 +1366,41 @@ function parsePrime(
   // i.e. f' -> Derivative(f)
 
   const sym = symbol(lhs);
-  if ((sym && parser.getSymbolType(sym).matches('function')) || operator(lhs)) {
+  const isKnownFunction =
+    (sym && parser.getSymbolType(sym).matches('function')) || operator(lhs);
+
+  // Check if followed by arguments - if so, treat as function derivative
+  // This handles both known functions like sin'(x) and unknown like g'(t)
+  parser.skipSpace();
+  const args = parser.parseArguments('enclosure');
+
+  if (args && args.length > 0) {
+    // Infer differentiation variable from first argument (if it's a symbol)
+    const firstArg = args[0];
+    const variable = symbol(firstArg) ?? 'x';
+
+    // Build function call: f(x, y, ...) -> ['f', x, y, ...]
+    const fnCall =
+      typeof lhs === 'string'
+        ? ([lhs, ...args] as Expression)
+        : (['Apply', lhs, ...args] as Expression);
+
+    // Wrap with nested D for the order
+    let result: Expression = fnCall;
+    for (let i = 0; i < order; i++) {
+      result = ['D', result, variable] as Expression;
+    }
+    return result;
+  }
+
+  // No arguments
+  if (isKnownFunction) {
+    // Return Derivative for known functions
     if (order === 1) return ['Derivative', lhs];
     return ['Derivative', lhs, order];
   }
-  // Otherwise, if it's a number or a symbol, return a
-  // generic "Prime"
+
+  // Otherwise, if it's a number or a symbol, return a generic "Prime"
   if (order === 1) return ['Prime', missingIfEmpty(lhs)];
   return ['Prime', missingIfEmpty(lhs), order];
 }
@@ -1387,6 +1577,27 @@ export function latexToDelimiterShorthand(s: string): string | undefined {
 
 function parseAssign(parser: Parser, lhs: Expression): Expression | null {
   //
+  // 0/ Convert compound symbols back to Subscript form for sequence definitions
+  // e.g., "L_0" → ['Subscript', 'L', 0]
+  // e.g., "a_n" → ['Subscript', 'a', 'n']
+  //
+  const lhsSymbol = symbol(lhs);
+  if (lhsSymbol && lhsSymbol.includes('_')) {
+    const underscoreIndex = lhsSymbol.indexOf('_');
+    const baseName = lhsSymbol.substring(0, underscoreIndex);
+    const subscriptStr = lhsSymbol.substring(underscoreIndex + 1);
+
+    // Try to parse subscript as integer
+    const subscriptNum = parseInt(subscriptStr, 10);
+    const subscript: Expression =
+      !isNaN(subscriptNum) && String(subscriptNum) === subscriptStr
+        ? subscriptNum
+        : subscriptStr; // Keep as symbol string
+
+    lhs = ['Subscript', baseName, subscript];
+  }
+
+  //
   // 1/ f(x,y) := ...
   //
   if (
@@ -1430,9 +1641,12 @@ function parseAssign(parser: Parser, lhs: Expression): Expression | null {
 
     if (symbol(sub)) {
       //
-      // 2.2 // f_n := ...
+      // 2.2 // f_n := ... OR a_n := a_{n-1} + 1 (sequence definition)
+      // Preserve Subscript form - the Assign evaluate handler will determine
+      // if this is a function definition or sequence definition based on
+      // whether the RHS contains self-references.
       //
-      return ['Assign', fn, ['Function', rhs, sub!]];
+      return ['Assign', lhs, rhs];
     }
 
     return ['Assign', lhs, rhs];

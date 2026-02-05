@@ -111,21 +111,7 @@ describe('STEFNOTCH #13', () => {
         "Q",
         [
           "Function",
-          [
-            "Block",
-            [
-              "Ceil",
-              [
-                "Error",
-                [
-                  "ErrorCode",
-                  "incompatible-type",
-                  "'real'",
-                  "'finite_number'"
-                ]
-              ]
-            ]
-          ],
+          ["Ceil", ["Divide", 4, ["Square", "epsilonSymbol"]]],
           "epsilonSymbol"
         ]
       ]
@@ -133,18 +119,11 @@ describe('STEFNOTCH #13', () => {
   });
 
   test('2/ x_{1,2}=1,2', () => {
-    expect(parse('x_{1,2}=1,2')).toMatchInlineSnapshot(`
-      [
-        "Pair",
-        [
-          "Equal",
-          ["Subscript", "x", ["Delimiter", ["Sequence", 1, 2], ","]],
-          1
-        ],
-        2
-      ]
-    `);
-  }); // @fixme unclear what the right answer is
+    // Delimiter is stripped from subscript expressions
+    expect(parse('x_{1,2}=1,2')).toMatchInlineSnapshot(
+      `["Pair", ["Equal", ["Subscript", "x", ["Sequence", 1, 2]], 1], 2]`
+    );
+  });
 
   test('3/  \\{1,2\\}', () => {
     expect(parse('\\{1,2\\}')).toMatchInlineSnapshot(`["Set", 1, 2]`);
@@ -201,6 +180,9 @@ describe('STEFNOTCH #13', () => {
     `);
   });
 
+  // Note: With tight quantifier scope (issue #263), \implies is now outside
+  // the ForAll scope, matching standard FOL conventions where
+  // \forall n: P(n) \implies Q(n) parses as (\forall n: P(n)) \implies Q(n)
   test('10/ \\forall n\\colon a_n\\le c_n\\le b_n\\implies\\lim_{n\\to\\infin}c_n=a', () => {
     expect(
       parse(
@@ -208,25 +190,16 @@ describe('STEFNOTCH #13', () => {
       )
     ).toMatchInlineSnapshot(`
       [
-        "ForAll",
-        "n",
+        "Implies",
+        ["ForAll", "n", ["LessEqual", "a_n", "c_n", "b_n"]],
         [
-          "Implies",
+          "Equal",
           [
-            "LessEqual",
-            ["Subscript", "a", "n"],
-            ["Subscript", "c", "n"],
-            ["Subscript", "b", "n"]
+            "Limit",
+            ["Function", "c_n", "n"],
+            ["Error", "unexpected-command", ["LatexString", "\\infin"]]
           ],
-          [
-            "Equal",
-            [
-              "Limit",
-              ["Function", ["Subscript", "c", "n"], "n"],
-              ["Error", "unexpected-command", ["LatexString", "\\infin"]]
-            ],
-            "a"
-          ]
+          "a"
         ]
       ]
     `);

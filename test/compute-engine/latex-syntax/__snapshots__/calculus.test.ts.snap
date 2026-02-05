@@ -66,46 +66,55 @@ int^(1)(sin(x) dx)
 ]
 `;
 
+exports[`EULER DERIVATIVE NOTATION D without subscript - should parse as symbol 1`] = `
+D
+D
+D
+`;
+
+exports[`EULER DERIVATIVE NOTATION D^2_x f - second derivative 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}\\frac{\\mathrm{d}}{\\mathrm{d}x}f
+D((x) |-> D((x) |-> f, x), x)
+["D", ["Function", ["D", ["Function", "f", "x"], "x"], "x"], "x"]
+`;
+
+exports[`EULER DERIVATIVE NOTATION D_t x - different variable 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}t}x
+D((t) |-> x, t)
+["D", ["Function", "x", "t"], "t"]
+`;
+
+exports[`EULER DERIVATIVE NOTATION D_x (x^2 + 1) - derivative of expression 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}x^2+1
+D((x) |-> x^2 + 1, x)
+["D", ["Function", ["Add", ["Square", "x"], 1], "x"], "x"]
+`;
+
+exports[`EULER DERIVATIVE NOTATION D_x f - first derivative 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}f
+D((x) |-> f, x)
+["D", ["Function", "f", "x"], "x"]
+`;
+
 exports[`EXOTIC INTEGRALS \\iiint 1`] = `
-\\int\\int\\int_{\\mathtip{\\error{\\blacksquare}}{\\in \\text{unknown}\\notin \\text{number}}}\\!f(x, y, z)\\, \\mathrm{d}x \\mathrm{d}y \\mathrm{d}z
-int_(Error(ErrorCode("incompatible-type", "number", "unknown")))(f(x, y, z) dx  dy  dz)
+\\int\\int\\int_{V}\\!f(x, y, z)\\, \\mathrm{d}x \\mathrm{d}y \\mathrm{d}z
+int_(V)(f(x, y, z) dx  dy  dz)
 [
   "Integrate",
   ["Function", ["f", "x", "y", "z"], "x", "y", "z"],
-  [
-    "Limits",
-    "x",
-    [
-      "Error",
-      ["ErrorCode", "incompatible-type", "'number'", "'unknown'"]
-    ],
-    "Nothing"
-  ],
+  ["Limits", "x", "V", "Nothing"],
   ["Limits", "y", "Nothing", "Nothing"],
   ["Limits", "z", "Nothing", "Nothing"]
 ]
 `;
 
 exports[`EXOTIC INTEGRALS \\iint 1`] = `
-\\int\\int_{\\mathtip{\\error{\\blacksquare}}{\\in \\text{(expression, variable: symbol, variables: symbol+) -> expression}\\notin \\text{number}}}\\!f(x, y)\\, \\mathrm{d}x \\mathrm{d}y
-int_(Error(ErrorCode("incompatible-type", "number", "(expression, variable: symbol, variables: symbol+) -> expression")))(f(x, y) dx  dy)
+\\int\\int_{D}\\!f(x, y)\\, \\mathrm{d}x \\mathrm{d}y
+int_(D)(f(x, y) dx  dy)
 [
   "Integrate",
   ["Function", ["f", "x", "y"], "x", "y"],
-  [
-    "Limits",
-    "x",
-    [
-      "Error",
-      [
-        "ErrorCode",
-        "incompatible-type",
-        "'number'",
-        "(expression, variable: symbol, variables: symbol+) -> expression"
-      ]
-    ],
-    "Nothing"
-  ],
+  ["Limits", "x", "D", "Nothing"],
   ["Limits", "y", "Nothing", "Nothing"]
 ]
 `;
@@ -407,6 +416,64 @@ int(sin(x) dx) + 1 === 2
 ]
 `;
 
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS \\sin'(x) - known function with prime 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}\\sin(x)
+D((x) |-> sin(x), x)
+["D", ["Function", ["Sin", "x"], "x"], "x"]
+`;
+
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS f' without arguments - returns Derivative 1`] = `
+f^{\\prime}
+Derivative(f)
+["Derivative", "f"]
+`;
+
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS f'''(x) - triple prime with argument 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}\\frac{\\mathrm{d}}{\\mathrm{d}x}\\frac{\\mathrm{d}}{\\mathrm{d}x}f(x)
+D((x) |-> D((x) |-> D((x) |-> f(x), x), x), x)
+[
+  "D",
+  [
+    "Function",
+    [
+      "D",
+      ["Function", ["D", ["Function", ["f", "x"], "x"], "x"], "x"],
+      "x"
+    ],
+    "x"
+  ],
+  "x"
+]
+`;
+
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS f''(x) - double prime with argument 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}\\frac{\\mathrm{d}}{\\mathrm{d}x}f(x)
+D((x) |-> D((x) |-> f(x), x), x)
+[
+  "D",
+  ["Function", ["D", ["Function", ["f", "x"], "x"], "x"], "x"],
+  "x"
+]
+`;
+
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS f'(x) - single prime with argument 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}f(x)
+D((x) |-> f(x), x)
+["D", ["Function", ["f", "x"], "x"], "x"]
+`;
+
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS f'(x, y) - multiple arguments uses first as variable 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}x}f(x, y)
+D((x) |-> f(x, y), x)
+["D", ["Function", ["f", "x", "y"], "x"], "x"]
+`;
+
+exports[`LAGRANGE PRIME NOTATION WITH ARGUMENTS g'(t) - different variable 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}t}g(t)
+D((t) |-> g(t), t)
+["D", ["Function", ["g", "t"], "t"], "t"]
+`;
+
 exports[`MULTIPLE INTEGRALS Double integral 1`] = `
 \\int_{1}^{2}\\!\\int\\int_{0}^{1}\\!x^2+y^2\\, \\mathrm{d}x \\mathrm{d}y
 int_(1)^(2)(int_(0)^(1)(x^2 + y^2 dx  dy) dx  dy)
@@ -522,9 +589,77 @@ int_(1)^(2)(int_(0)^(1)(int_(3)^(4)(x^2 + y^2 + z^2 dx  dy  dz) dx  dy  dz) dx  
 ]
 `;
 
+exports[`NEWTON DOT NOTATION Dot notation with expression 1`] = `
+\\mathtip{\\error{\\blacksquare}}{\\in \\text{expression}\\notin \\text{number}}+\\mathtip{\\error{\\blacksquare}}{\\in \\text{expression}\\notin \\text{number}}
+Error(ErrorCode("incompatible-type", "number", "expression")) + Error(ErrorCode("incompatible-type", "number", "expression"))
+[
+  "Add",
+  [
+    "Error",
+    ["ErrorCode", "incompatible-type", "'number'", "'expression'"]
+  ],
+  [
+    "Error",
+    ["ErrorCode", "incompatible-type", "'number'", "'expression'"]
+  ]
+]
+`;
+
+exports[`NEWTON DOT NOTATION First derivative \\dot{x} 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}t}x
+D((t) |-> x, t)
+["D", ["Function", "x", "t"], "t"]
+`;
+
+exports[`NEWTON DOT NOTATION Fourth derivative \\ddddot{z} 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}t}\\frac{\\mathrm{d}}{\\mathrm{d}t}\\frac{\\mathrm{d}}{\\mathrm{d}t}\\frac{\\mathrm{d}}{\\mathrm{d}t}z
+D((t) |-> D((t) |-> D((t) |-> D((t) |-> z, t), t), t), t)
+[
+  "D",
+  [
+    "Function",
+    [
+      "D",
+      [
+        "Function",
+        [
+          "D",
+          ["Function", ["D", ["Function", "z", "t"], "t"], "t"],
+          "t"
+        ],
+        "t"
+      ],
+      "t"
+    ],
+    "t"
+  ],
+  "t"
+]
+`;
+
+exports[`NEWTON DOT NOTATION Second derivative \\ddot{x} 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}t}\\frac{\\mathrm{d}}{\\mathrm{d}t}x
+D((t) |-> D((t) |-> x, t), t)
+["D", ["Function", ["D", ["Function", "x", "t"], "t"], "t"], "t"]
+`;
+
+exports[`NEWTON DOT NOTATION Third derivative \\dddot{y} 1`] = `
+\\frac{\\mathrm{d}}{\\mathrm{d}t}\\frac{\\mathrm{d}}{\\mathrm{d}t}\\frac{\\mathrm{d}}{\\mathrm{d}t}y
+D((t) |-> D((t) |-> D((t) |-> y, t), t), t)
+[
+  "D",
+  [
+    "Function",
+    ["D", ["Function", ["D", ["Function", "y", "t"], "t"], "t"], "t"],
+    "t"
+  ],
+  "t"
+]
+`;
+
 exports[`REAL WORLD INTEGRALS Integral with non standard typesetting 1`] = `
-\\mathrm{S_{t}}=\\mathrm{S_0}+\\int_{\\mathtip{\\error{\\blacksquare}}{\\in \\text{unknown}\\notin \\text{number}}}^{\\mathtip{\\error{\\blacksquare}}{\\in \\text{unknown}\\notin \\text{number}}}\\!G-F\\, \\mathrm{d}t
-"S_t" === "S_0" + int_(Error(ErrorCode("incompatible-type", "number", "unknown")))^(Error(ErrorCode("incompatible-type", "number", "unknown")))(-F + "CatalanConstant" dF)
+\\mathrm{S_{t}}=\\mathrm{S_0}+\\int_{\\mathrm{t_{i}}}^{\\mathrm{t_{e}}}\\!G-F\\, \\mathrm{d}t
+"S_t" === "S_0" + int_("t_i")^("t_e")(-F + "CatalanConstant" dF)
 [
   "Equal",
   "S_t",
@@ -534,18 +669,7 @@ exports[`REAL WORLD INTEGRALS Integral with non standard typesetting 1`] = `
     [
       "Integrate",
       ["Function", ["Subtract", "CatalanConstant", "F"], "F"],
-      [
-        "Limits",
-        "t",
-        [
-          "Error",
-          ["ErrorCode", "incompatible-type", "'number'", "'unknown'"]
-        ],
-        [
-          "Error",
-          ["ErrorCode", "incompatible-type", "'number'", "'unknown'"]
-        ]
-      ]
+      ["Limits", "t", "t_i", "t_e"]
     ]
   ]
 ]

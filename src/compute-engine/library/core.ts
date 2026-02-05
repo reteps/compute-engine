@@ -3,6 +3,14 @@ import { joinLatex } from '../latex-syntax/tokenizer';
 import { checkType, checkArity } from '../boxed-expression/validate';
 import { canonicalForm } from '../boxed-expression/canonical';
 import { asSmallInteger, toInteger } from '../boxed-expression/numerics';
+import {
+  addSequenceBaseCase,
+  addSequenceRecurrence,
+  addMultiIndexBaseCase,
+  addMultiIndexRecurrence,
+  containsSelfReference,
+  extractIndexVariable,
+} from '../sequence';
 
 import {
   apply,
@@ -31,7 +39,7 @@ import type {
 } from '../global-types';
 import { BoxedString } from '../boxed-expression/boxed-string';
 import { canonical } from '../boxed-expression/canonical-utils';
-import { isDictionary } from '../boxed-expression/utils';
+import { isDictionary, isValueDef } from '../boxed-expression/utils';
 
 //   // := assign 80 // @todo
 // compose (compose(f, g) -> a new function such that compose(f, g)(x) -> f(g(x))
@@ -433,24 +441,185 @@ export const CORE_LIBRARY: SymbolDefinitions[] = [
     },
 
     Assign: {
-      description: 'Assign a value to a symbol',
+      description: 'Assign a value to a symbol or define a sequence',
       lazy: true,
       pure: false,
-      signature: '(symbol, any) -> any',
+      signature: '(symbol | expression, any) -> any',
       type: ([_symbol, value]) => value.type,
       canonical: (args, { engine: ce }) => {
         if (args.length !== 2) return null;
 
+        // Check if LHS is a Subscript expression (for sequence definitions)
+        // e.g., ['Subscript', 'L', 0] or ['Subscript', 'a', 'n']
+        const lhs = args[0];
+        if (lhs.operator === 'Subscript') {
+          // Preserve Subscript form for sequence definitions
+          return ce._fn('Assign', [lhs.canonical, args[1].canonical]);
+        }
+
         // Note: we can't use checkType() because it canonicalized/bind the argument.
-        let symbol = args[0];
+        let symbol = lhs;
         if (!symbol.symbol) {
           // If the argument was not a symbol literal, see if we can evaluate it to a symbol
-          symbol = checkType(ce, args[0], 'symbol');
+          symbol = checkType(ce, lhs, 'symbol');
         }
 
         return ce._fn('Assign', [symbol, args[1].canonical]);
       },
       evaluate: ([op1, op2], { engine: ce }) => {
+        //
+        // Check for compound symbol LHS (sequence definition from parser)
+        // e.g., "L_0" which the parser creates when it sees L_0 := 1
+        // We need to detect this and treat it as a sequence base case
+        //
+        if (op1.symbol && op1.symbol.includes('_')) {
+          const underscoreIndex = op1.symbol.indexOf('_');
+          const seqName = op1.symbol.substring(0, underscoreIndex);
+          const subscriptStr = op1.symbol.substring(underscoreIndex + 1);
+
+          // Try to parse subscript as integer (base case)
+          const subscriptNum = parseInt(subscriptStr, 10);
+          if (!isNaN(subscriptNum) && String(subscriptNum) === subscriptStr) {
+            // Numeric subscript → base case
+            const value = op2.evaluate();
+            addSequenceBaseCase(ce, seqName, subscriptNum, value);
+            return ce.Nothing;
+          }
+
+          // Symbol subscript → check for self-reference (recurrence)
+          if (containsSelfReference(op2, seqName)) {
+            addSequenceRecurrence(ce, seqName, subscriptStr, op2);
+            return ce.Nothing;
+          }
+
+          // No self-reference → function definition
+          const fnDef = ce.function('Function', [op2, ce.symbol(subscriptStr)]);
+          ce.assign(seqName, fnDef);
+          return ce.Nothing;
+        }
+
+        //
+        // Check for Subscript LHS (sequence definition)
+        // e.g., Subscript(L, 0) := 1  OR  Subscript(a, n) := a_{n-1} + 1
+        // Also handles multi-index: Subscript(P, Sequence(n, k)) := ...
+        //
+        if (op1.operator === 'Subscript' && op1.op1?.symbol) {
+          const seqName = op1.op1.symbol;
+          const subscript = op1.op2;
+
+          //
+          // Check for multi-index subscript: P_{n,k}
+          // Parser produces: Subscript(P, Sequence(n, k))
+          //
+          if (subscript?.operator === 'Sequence' && subscript.ops) {
+            const indices = subscript.ops;
+
+            // Case M1: All numeric → multi-index base case
+            // e.g., P_{0,0} := 1
+            if (
+              indices.every(
+                (op) => op.isNumberLiteral && Number.isInteger(op.re)
+              )
+            ) {
+              const key = indices.map((op) => op.re).join(',');
+              addMultiIndexBaseCase(ce, seqName, key, op2.evaluate());
+              return ce.Nothing;
+            }
+
+            // Extract variable names from indices
+            // For symbols: use the symbol name
+            // For numbers: use the number as string
+            // For expressions: try to extract the variable
+            const indexVars: string[] = [];
+            let hasSymbols = false;
+            let allValid = true;
+
+            for (const idx of indices) {
+              if (idx.symbol) {
+                indexVars.push(idx.symbol);
+                hasSymbols = true;
+              } else if (idx.isNumberLiteral && Number.isInteger(idx.re)) {
+                indexVars.push(String(idx.re));
+              } else {
+                // Complex expression - try to extract variable
+                const v = extractIndexVariable(idx);
+                if (v) {
+                  indexVars.push(v);
+                  hasSymbols = true;
+                } else {
+                  allValid = false;
+                  break;
+                }
+              }
+            }
+
+            if (allValid && indexVars.length === indices.length) {
+              if (containsSelfReference(op2, seqName)) {
+                // Case M2: Recurrence with self-reference
+                // e.g., P_{n,k} := P_{n-1,k-1} + P_{n-1,k}
+                // Only use symbol variables for the recurrence
+                const recurrenceVars = indices
+                  .filter((idx) => idx.symbol)
+                  .map((idx) => idx.symbol!);
+
+                if (recurrenceVars.length > 0) {
+                  addMultiIndexRecurrence(ce, seqName, recurrenceVars, op2);
+                  return ce.Nothing;
+                }
+              } else if (hasSymbols) {
+                // Case M3: Pattern base case (no self-reference)
+                // e.g., P_{n,0} := 1 or P_{n,n} := 1
+                const key = indexVars.join(',');
+                addMultiIndexBaseCase(ce, seqName, key, op2.evaluate());
+                return ce.Nothing;
+              }
+            }
+
+            // Fallback for multi-index: if we couldn't handle it, continue
+          }
+
+          // Case 1: Numeric subscript → base case
+          // e.g., L_0 := 1, F_1 := 1
+          if (subscript?.isNumberLiteral && Number.isInteger(subscript.re)) {
+            const index = subscript.re;
+            const value = op2.evaluate();
+            addSequenceBaseCase(ce, seqName, index, value);
+            return ce.Nothing;
+          }
+
+          // Case 2: Symbol subscript → check for self-reference
+          // e.g., a_n := a_{n-1} + 1  vs  f_n := 2*n + 1
+          if (subscript?.symbol) {
+            const indexVar = subscript.symbol;
+
+            if (containsSelfReference(op2, seqName)) {
+              // Sequence recurrence definition
+              addSequenceRecurrence(ce, seqName, indexVar, op2);
+              return ce.Nothing;
+            } else {
+              // Function definition (no self-reference)
+              // Convert to: f(n) := expr
+              const fnDef = ce.function('Function', [op2, ce.symbol(indexVar)]);
+              ce.assign(seqName, fnDef);
+              return ce.Nothing;
+            }
+          }
+
+          // Case 3: Complex subscript → check for self-reference
+          // e.g., a_{n+1} := a_n + 1
+          if (containsSelfReference(op2, seqName)) {
+            const indexVar = extractIndexVariable(subscript!);
+            if (indexVar) {
+              addSequenceRecurrence(ce, seqName, indexVar, op2);
+              return ce.Nothing;
+            }
+          }
+
+          // Fallback: treat as regular assignment to compound symbol
+          // This shouldn't normally happen with well-formed input
+        }
+
+        // Regular symbol assignment
         const symbol = op1.evaluate();
         if (!symbol.symbol) return undefined;
         const val = op2.evaluate();
@@ -731,7 +900,39 @@ export const CORE_LIBRARY: SymbolDefinitions[] = [
         if (op1.string && asSmallInteger(op2) !== null) return 'integer';
         if (op1.isIndexedCollection)
           return collectionElementType(op1.type.type) ?? 'any';
-        if (op1.symbol) return 'symbol';
+
+        // Check if the symbol is declared as a collection type
+        if (op1.symbol) {
+          const eltType = collectionElementType(op1.type.type);
+          if (eltType) return eltType;
+        }
+
+        // For symbol bases with complex subscripts (like a_{n+1}), return 'unknown'
+        // to allow type inference in arithmetic contexts. Simple subscripts
+        // (like a_n) are converted to compound symbols during canonicalization
+        // and won't reach this type function.
+        if (op1.symbol) {
+          // If the base symbol has subscriptEvaluate, the result will be a number
+          // (or undefined, which keeps it as Subscript)
+          const symbolDef = ce.lookupDefinition(op1.symbol);
+          if (isValueDef(symbolDef) && symbolDef.value.subscriptEvaluate) {
+            return 'number';
+          }
+          // Check if this would become a compound symbol (simple subscript)
+          const sub =
+            op2.string ?? op2.symbol ?? asSmallInteger(op2)?.toString();
+          if (sub) return 'symbol';
+          // Check for InvisibleOperator of symbols/numbers (also becomes compound symbol)
+          if (op2.operator === 'InvisibleOperator' && op2.ops) {
+            const parts = op2.ops.map(
+              (x) => x.symbol ?? asSmallInteger(x)?.toString()
+            );
+            if (parts.every((p) => p !== undefined && p !== null))
+              return 'symbol';
+          }
+          // Complex subscript - return 'unknown' to allow numeric inference
+          return 'unknown';
+        }
         return 'expression';
       },
 
@@ -754,8 +955,29 @@ export const CORE_LIBRARY: SymbolDefinitions[] = [
           ]);
         }
 
-        // Is it a collection?
+        // Is it a collection expression (like a list literal)?
         if (op1.isIndexedCollection) return ce._fn('At', [op1, op2.canonical]);
+
+        // Is it a symbol declared as a collection type?
+        // If so, convert to At() for indexing
+        if (op1.symbol && collectionElementType(op1.type.type)) {
+          // For multi-index subscripts (Sequence/Tuple), pass each index as separate arg
+          if (
+            (op2.operator === 'Sequence' || op2.operator === 'Tuple') &&
+            op2.ops
+          )
+            return ce._fn('At', [op1, ...op2.ops.map((x) => x.canonical)]);
+          return ce._fn('At', [op1, op2.canonical]);
+        }
+
+        // If the base symbol has a subscriptEvaluate handler, keep as Subscript
+        // so the evaluate handler can call it (don't create compound symbol)
+        if (op1.symbol) {
+          const symbolDef = ce.lookupDefinition(op1.symbol);
+          if (isValueDef(symbolDef) && symbolDef.value.subscriptEvaluate) {
+            return ce._fn('Subscript', [op1, op2.canonical]);
+          }
+        }
 
         // Is it a compound symbol `x_\operatorname{max}`, `\mu_0`
         if (op1.symbol) {
@@ -763,12 +985,55 @@ export const CORE_LIBRARY: SymbolDefinitions[] = [
             op2.string ?? op2.symbol ?? asSmallInteger(op2)?.toString();
 
           if (sub) return ce.symbol(op1.symbol + '_' + sub);
+
+          // If subscript is an InvisibleOperator of symbols/numbers (not wrapped
+          // in a Delimiter), concatenate them to form a compound symbol name.
+          // e.g., `A_{CD}` -> `A_CD`, `x_{ij}` -> `x_ij`, `T_{max}` -> `T_max`
+          // Use parentheses for expressions: `A_{(CD)}` remains as subscript expression.
+          if (op2.operator === 'InvisibleOperator' && op2.ops) {
+            const parts = op2.ops.map(
+              (x) => x.symbol ?? asSmallInteger(x)?.toString()
+            );
+            if (parts.every((p) => p !== undefined && p !== null)) {
+              return ce.symbol(op1.symbol + '_' + parts.join(''));
+            }
+          }
         }
 
         if (op2.operator === 'Sequence')
           ce._fn('Subscript', [op1, ce._fn('List', op2.ops!)]);
 
-        return ce._fn('Subscript', [op1, op2]);
+        // Unwrap Delimiter (parentheses) from the subscript expression
+        // e.g., `A_{(n+1)}` -> `["Subscript", "A", ["Add", "n", 1]]`
+        let sub = op2;
+        if (op2.operator === 'Delimiter' && op2.op1) sub = op2.op1.canonical;
+
+        return ce._fn('Subscript', [op1, sub]);
+      },
+
+      evaluate: (ops, { engine: ce, numericApproximation }) => {
+        const [base, subscript] = ops;
+
+        // Check if base is a symbol with a subscriptEvaluate handler
+        if (base.symbol) {
+          const def = base.valueDefinition;
+          if (def?.subscriptEvaluate) {
+            // Evaluate the subscript first
+            const evalSubscript = subscript.evaluate({ numericApproximation });
+
+            // Call the custom handler
+            const result = def.subscriptEvaluate(evalSubscript, {
+              engine: ce,
+              numericApproximation,
+            });
+
+            // If handler returned a result, use it
+            if (result !== undefined) return result;
+          }
+        }
+
+        // Fallback: return undefined to keep expression symbolic
+        return undefined;
       },
     },
 
